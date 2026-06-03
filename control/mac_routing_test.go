@@ -62,7 +62,8 @@ func routeWithMac(t *testing.T, plane *ControlPlane, mac [6]uint8) (consts.Outbo
 	src := netip.MustParseAddrPort("192.0.2.10:12345")
 	dst := netip.MustParseAddrPort("198.51.100.20:443")
 
-	return plane.Route(src, dst, "", consts.L4ProtoType_TCP, &bpfRoutingResult{Mac: mac})
+	outbound, mark, must, _, err := plane.Route(src, dst, "", consts.L4ProtoType_TCP, &bpfRoutingResult{Mac: mac})
+	return outbound, mark, must, err
 }
 
 func TestControlPlaneRoute_NegativeMacRuleSkipsZeroMac(t *testing.T) {

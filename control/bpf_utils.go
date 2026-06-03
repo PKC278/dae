@@ -62,6 +62,7 @@ type bpfRoutingResult struct {
 	Pname    [16]uint8
 	Pid      uint32
 	Dscp     uint8
+	Drop     uint8
 }
 
 type _bpfLpmKey struct {

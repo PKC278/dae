@@ -22,7 +22,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func (c *ControlPlane) Route(src, dst netip.AddrPort, domain string, l4proto consts.L4ProtoType, routingResult *bpfRoutingResult) (outboundIndex consts.OutboundIndex, mark uint32, must bool, err error) {
+func (c *ControlPlane) Route(src, dst netip.AddrPort, domain string, l4proto consts.L4ProtoType, routingResult *bpfRoutingResult) (outboundIndex consts.OutboundIndex, mark uint32, must bool, drop bool, err error) {
 	var ipVersion consts.IpVersionType
 	if dst.Addr().Is4() || dst.Addr().Is4In6() {
 		ipVersion = consts.IpVersion_4
@@ -33,7 +33,7 @@ func (c *ControlPlane) Route(src, dst netip.AddrPort, domain string, l4proto con
 	copy(mac16[10:], routingResult.Mac[:])
 	bSrc := src.Addr().As16()
 	bDst := dst.Addr().As16()
-	outboundIndex, mark, must, err = c.routingMatcher.Match(
+	outboundIndex, mark, must, drop, err = c.routingMatcher.MatchWithDrop(
 		bSrc,
 		bDst,
 		src.Port(),
@@ -101,6 +101,7 @@ func (c *controlPlaneCore) retrieveEmbeddedRoutingResult(tuples *bpfTuplesKey, l
 			connState.Meta.Data.Mark,
 			connState.Meta.Data.Must,
 			connState.Meta.Data.Outbound,
+			connState.Meta.Data.HasRouting&routingMetaFlagDrop,
 			connState.Mac,
 			connState.Meta.Data.Dscp,
 			connState.Pname,
@@ -124,6 +125,7 @@ func (c *controlPlaneCore) retrieveEmbeddedRoutingResult(tuples *bpfTuplesKey, l
 			connState.Meta.Data.Mark,
 			connState.Meta.Data.Must,
 			connState.Meta.Data.Outbound,
+			connState.Meta.Data.HasRouting&routingMetaFlagDrop,
 			connState.Mac,
 			connState.Meta.Data.Dscp,
 			connState.Pname,
@@ -136,11 +138,16 @@ func (c *controlPlaneCore) retrieveEmbeddedRoutingResult(tuples *bpfTuplesKey, l
 	return &routingResult, nil
 }
 
-func routingResultFromConnState(mark uint32, must uint8, outbound uint8, mac [6]uint8, dscp uint8, pname [16]uint8, pid uint32) bpfRoutingResult {
+const routingMetaFlagDrop uint8 = 1 << 1
+
+func routingResultFromConnState(mark uint32, must uint8, outbound uint8, drop uint8, mac [6]uint8, dscp uint8, pname [16]uint8, pid uint32) bpfRoutingResult {
 	var routingResult bpfRoutingResult
 	routingResult.Mark = mark
 	routingResult.Must = must
 	routingResult.Outbound = outbound
+	if drop != 0 {
+		routingResult.Drop = 1
+	}
 	routingResult.Mac = mac
 	routingResult.Dscp = dscp
 	routingResult.Pname = pname
@@ -181,6 +188,7 @@ func (c *controlPlaneCore) retrieveRoutingHandoffResult(tuples *bpfTuplesKey) (*
 		entry.Result.Mark,
 		entry.Result.Must,
 		entry.Result.Outbound,
+		entry.Result.Drop,
 		entry.Result.Mac,
 		entry.Result.Dscp,
 		entry.Result.Pname,

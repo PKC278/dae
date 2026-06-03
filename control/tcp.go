@@ -227,10 +227,14 @@ func (c *ControlPlane) handleConn(ctx context.Context, lConn net.Conn) (err erro
 		Dest:        dst,
 		Mark:        routingResult.Mark,
 		Network:     "tcp",
+		Drop:        routingResult.Drop != 0,
 	}
 	// Dial and relay.
 	rConn, res, err := c.routeDial(ctx, dialParam)
 	if err != nil {
+		if stderrors.Is(err, errBlockDrop) {
+			return nil
+		}
 		if res != nil && res.Outbound != nil && stderrors.Is(err, ob.ErrNoAliveDialer) {
 			res.Outbound.HandleNoAliveDialer(
 				res.OrigNetworkType,
