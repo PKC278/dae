@@ -19,7 +19,10 @@ import (
 	"github.com/daeuniverse/outbound/netproxy"
 )
 
-var errBlockDrop = errors.New("block(drop) matched")
+var (
+	errBlockDrop   = errors.New("block(drop) matched")
+	errBlockReject = errors.New("block matched")
+)
 
 type proxyDialParam struct {
 	Outbound    consts.OutboundIndex

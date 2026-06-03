@@ -1003,7 +1003,7 @@ getNew:
 			},
 		})
 		if err != nil {
-			if stderrors.Is(err, errBlockDrop) {
+			if stderrors.Is(err, errBlockDrop) || stderrors.Is(err, errBlockReject) {
 				return nil
 			}
 			if stderrors.Is(err, ob.ErrNoAliveDialer) || stderrors.Is(err, ErrEndpointFailed) {
