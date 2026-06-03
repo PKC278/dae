@@ -51,6 +51,8 @@ type bpfMatchSet struct {
 	Type     uint8
 	Outbound uint8
 	Must     uint8
+	Drop     uint8
+	_        [2]byte
 	Mark     uint32
 }
 
@@ -97,6 +99,7 @@ type bpfRoutingResult struct {
 	Pname    [16]uint8
 	Pid      uint32
 	Dscp     uint8
+	Drop     uint8
 }
 
 type bpfRoutingHandoffEntry struct {

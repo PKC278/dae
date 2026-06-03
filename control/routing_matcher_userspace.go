@@ -29,6 +29,7 @@ type compiledRoutingMatch struct {
 	not       bool
 	mark      uint32
 	must      bool
+	drop      bool
 
 	lpmIndex  uint32
 	portStart uint16
@@ -45,6 +46,7 @@ func compileRoutingMatch(match bpfMatchSet) (compiledRoutingMatch, error) {
 		not:       match.Not != 0,
 		mark:      match.Mark,
 		must:      match.Must != 0,
+		drop:      match.Drop != 0,
 	}
 
 	switch compiled.matchType {
@@ -92,8 +94,35 @@ func (m *RoutingMatcher) Match(
 	dscp uint8,
 	mac [16]uint8,
 ) (outboundIndex consts.OutboundIndex, mark uint32, must bool, err error) {
+	outboundIndex, mark, must, _, err = m.MatchWithDrop(
+		sourceAddr,
+		destAddr,
+		sourcePort,
+		destPort,
+		ipVersion,
+		l4proto,
+		domain,
+		processName,
+		dscp,
+		mac,
+	)
+	return
+}
+
+func (m *RoutingMatcher) MatchWithDrop(
+	sourceAddr [16]uint8,
+	destAddr [16]uint8,
+	sourcePort uint16,
+	destPort uint16,
+	ipVersion consts.IpVersionType,
+	l4proto consts.L4ProtoType,
+	domain string,
+	processName [16]uint8,
+	dscp uint8,
+	mac [16]uint8,
+) (outboundIndex consts.OutboundIndex, mark uint32, must bool, drop bool, err error) {
 	if len(sourceAddr) != net.IPv6len || len(destAddr) != net.IPv6len || len(mac) != net.IPv6len {
-		return 0, 0, false, fmt.Errorf("bad address length")
+		return 0, 0, false, false, fmt.Errorf("bad address length")
 	}
 
 	ipSetBin := trie.Prefix2bin128(netip.PrefixFrom(netip.AddrFrom16(destAddr), 128))
@@ -107,7 +136,7 @@ func (m *RoutingMatcher) Match(
 
 	matches := m.compiledMatches
 	if len(matches) == 0 {
-		return 0, 0, false, fmt.Errorf("no compiled routing match set")
+		return 0, 0, false, false, fmt.Errorf("no compiled routing match set")
 	}
 
 	goodSubrule := false
@@ -120,7 +149,7 @@ func (m *RoutingMatcher) Match(
 		case consts.MatchType_IpSet, consts.MatchType_SourceIpSet, consts.MatchType_Mac:
 			lpmIndex := int(match.lpmIndex)
 			if lpmIndex < 0 || lpmIndex >= len(m.lpmMatcher) {
-				return 0, 0, false, fmt.Errorf("bad lpm index: %d", lpmIndex)
+				return 0, 0, false, false, fmt.Errorf("bad lpm index: %d", lpmIndex)
 			}
 			lpm := m.lpmMatcher[lpmIndex]
 			var targetBin string
@@ -170,7 +199,7 @@ func (m *RoutingMatcher) Match(
 		case consts.MatchType_Fallback:
 			goodSubrule = true
 		default:
-			return 0, 0, false, fmt.Errorf("unknown match type: %v", match.matchType)
+			return 0, 0, false, false, fmt.Errorf("unknown match type: %v", match.matchType)
 		}
 	beforeNextLoop:
 		outbound := match.outbound
@@ -197,10 +226,10 @@ func (m *RoutingMatcher) Match(
 					must = true
 					continue
 				}
-				return outbound, match.mark, match.must || must, nil
+				return outbound, match.mark, match.must || must, match.drop, nil
 			}
 			badRule = false
 		}
 	}
-	return 0, 0, false, fmt.Errorf("no match set hit")
+	return 0, 0, false, false, fmt.Errorf("no match set hit")
 }

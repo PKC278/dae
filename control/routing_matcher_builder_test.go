@@ -122,3 +122,65 @@ func TestRoutingMatcherBuilderRejectsInvalidFallbackType(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unsupported function-or-string value type")
 }
+
+func TestRoutingMatcherBuilderBlockDropParam(t *testing.T) {
+	sections, err := config_parser.Parse(`routing {
+		l4proto(udp) -> block(drop)
+		fallback: direct
+	}`)
+	require.NoError(t, err)
+	routingSection := sections[0]
+	require.Len(t, routingSection.Items, 2)
+
+	builder, err := NewRoutingMatcherBuilder(
+		logrus.New(),
+		[]*config_parser.RoutingRule{routingSection.Items[0].Value.(*config_parser.RoutingRule)},
+		map[string]uint8{
+			consts.OutboundDirect.String(): uint8(consts.OutboundDirect),
+			consts.OutboundBlock.String():  uint8(consts.OutboundBlock),
+		},
+		nil,
+		routingSection.Items[1].Value.(*config_parser.Param).Val,
+	)
+	require.NoError(t, err)
+
+	matcher, err := builder.BuildUserspace()
+	require.NoError(t, err)
+	src := netip.MustParseAddrPort("192.0.2.10:12345")
+	dst := netip.MustParseAddrPort("198.51.100.20:443")
+	outbound, _, _, drop, err := matcher.MatchWithDrop(
+		src.Addr().As16(),
+		dst.Addr().As16(),
+		src.Port(),
+		dst.Port(),
+		consts.IpVersion_4,
+		consts.L4ProtoType_UDP,
+		"",
+		[16]uint8{},
+		0,
+		[16]uint8{},
+	)
+	require.NoError(t, err)
+	require.Equal(t, consts.OutboundBlock, outbound)
+	require.True(t, drop)
+}
+
+func TestRoutingMatcherBuilderDropParamOnlySupportsBlock(t *testing.T) {
+	sections, err := config_parser.Parse(`routing {
+		l4proto(udp) -> direct(drop)
+		fallback: direct
+	}`)
+	require.NoError(t, err)
+
+	_, err = NewRoutingMatcherBuilder(
+		logrus.New(),
+		[]*config_parser.RoutingRule{sections[0].Items[0].Value.(*config_parser.RoutingRule)},
+		map[string]uint8{
+			consts.OutboundDirect.String(): uint8(consts.OutboundDirect),
+		},
+		nil,
+		sections[0].Items[1].Value.(*config_parser.Param).Val,
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "only supported by block")
+}

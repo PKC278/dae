@@ -21,6 +21,8 @@ domain(full: dns.google) -> my_group
 domain(keyword: facebook) -> my_group
 domain(regex: '\.goo.*\.com$') -> my_group
 domain(geosite:category-ads) -> block
+# 使用 block(drop) 静默丢弃数据包；普通 block 会显式切断连接。
+domain(geosite:category-ads) -> block(drop)
 domain(geosite:cn)->direct
 
 ### 目标 IP 规则
