@@ -60,7 +60,8 @@ func routeWithDscp(t *testing.T, plane *ControlPlane, dscp uint8, l4proto consts
 	src := netip.MustParseAddrPort("192.0.2.10:12345")
 	dst := netip.MustParseAddrPort("198.51.100.20:443")
 
-	return plane.Route(src, dst, "", l4proto, &bpfRoutingResult{Dscp: dscp})
+	outbound, mark, must, _, err := plane.Route(src, dst, "", l4proto, &bpfRoutingResult{Dscp: dscp})
+	return outbound, mark, must, err
 }
 
 func TestControlPlaneRoute_DscpDecimalLiteralMatchesUserspaceFallback(t *testing.T) {

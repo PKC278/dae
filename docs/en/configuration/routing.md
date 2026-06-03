@@ -21,6 +21,8 @@ domain(full: dns.google) -> my_group
 domain(keyword: facebook) -> my_group
 domain(regex: '\.goo.*\.com$') -> my_group
 domain(geosite:category-ads) -> block
+# Use block(drop) to silently drop packets. Plain block explicitly rejects the connection.
+domain(geosite:category-ads) -> block(drop)
 domain(geosite:cn)->direct
 
 ### Dest IP rule

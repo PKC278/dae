@@ -7,6 +7,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 
@@ -17,6 +18,8 @@ import (
 	"github.com/daeuniverse/dae/component/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
 )
+
+var errBlockDrop = errors.New("block(drop) matched")
 
 type proxyDialParam struct {
 	Outbound    consts.OutboundIndex
@@ -29,6 +32,7 @@ type proxyDialParam struct {
 	Mark        uint32
 	Network     string         // e.g. "tcp", "udp"
 	Excluded    *dialer.Dialer // Dialer to exclude in selection
+	Drop        bool
 }
 
 type proxyDialResult struct {
@@ -126,8 +130,12 @@ func (c *ControlPlane) chooseProxyDialer(ctx context.Context, p *proxyDialParam)
 		if p.Network == "udp" {
 			proto = consts.L4ProtoType_UDP
 		}
-		if outboundIndex, newMark, _, err = c.Route(src, dst, domain, proto, routingResult); err != nil {
+		var drop bool
+		if outboundIndex, newMark, _, drop, err = c.Route(src, dst, domain, proto, routingResult); err != nil {
 			return nil, err
+		}
+		if drop {
+			return nil, errBlockDrop
 		}
 		mark = newMark
 		// Reset dialTarget.
@@ -140,6 +148,10 @@ func (c *ControlPlane) chooseProxyDialer(ctx context.Context, p *proxyDialParam)
 
 	if mark == 0 {
 		mark = c.soMarkFromDae
+	}
+
+	if p.Drop && outboundIndex == consts.OutboundBlock {
+		return nil, errBlockDrop
 	}
 
 	if int(outboundIndex) >= len(c.outbounds) {

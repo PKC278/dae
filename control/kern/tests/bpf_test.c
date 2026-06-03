@@ -888,7 +888,7 @@ int testsetup_wan_egress_direct_mark_reroute(struct __sk_buff *skb)
 
 	if (!mark_tcp_seen(&key, &tcph, false,
 			   &outbound, &mark, &must, NULL,
-			   0, NULL, 0))
+			   0, NULL, 0, NULL))
 		return TC_ACT_SHOT;
 
 	return TC_ACT_OK;
@@ -927,8 +927,8 @@ int testsetup_conntrack_args_scratch_reset(struct __sk_buff *skb)
 	if (!args)
 		return TC_ACT_SHOT;
 
-	conntrack_args_set(args, &outbound, &mark, &must, NULL, 11, pname, 99);
-	conntrack_args_set(args, NULL, NULL, NULL, NULL, 0, NULL, 0);
+	conntrack_args_set(args, &outbound, &mark, &must, NULL, 11, pname, 99, NULL);
+	conntrack_args_set(args, NULL, NULL, NULL, NULL, 0, NULL, 0, NULL);
 
 	if (args->flags != 0) {
 		bpf_printk("args->flags(%u) != 0\n", args->flags);

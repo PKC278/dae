@@ -267,7 +267,7 @@ func TestRetrievedRoutingResultStillMatchesMetadataSensitiveRules(t *testing.T) 
 			}
 			plane := newTestControlPlaneWithSingleMetadataRule(t, tt.functionName, tt.literal)
 
-			outbound, _, _, err := plane.Route(src, dst, "", consts.L4ProtoType(tt.l4proto), rr)
+			outbound, _, _, _, err := plane.Route(src, dst, "", consts.L4ProtoType(tt.l4proto), rr)
 			if err != nil {
 				t.Fatalf("Route(%s): %v", tt.name, err)
 			}
