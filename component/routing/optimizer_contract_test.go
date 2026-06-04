@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/pkg/config_parser"
@@ -266,6 +267,75 @@ func TestDownloadRuleProvidersOverwritesNonTextFile(t *testing.T) {
 	}
 	if string(content) != "+.remote.example\n" {
 		t.Fatalf("provider file was not overwritten: %q", content)
+	}
+}
+
+func TestDownloadRuleProvidersForceRefreshesExistingTextFile(t *testing.T) {
+	ruleProviderDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ruleProviderDir, "cn.list"), []byte("old.example\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(filepath.Join(ruleProviderDir, "cn.list"), oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	before := time.Now()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("new.example\n"))
+	}))
+	defer server.Close()
+
+	if err := DownloadRuleProvidersWithOptions(map[string]string{"cn": server.URL}, DownloadRuleProviderOptions{
+		Dir:   ruleProviderDir,
+		Force: true,
+	}); err != nil {
+		t.Fatalf("DownloadRuleProvidersWithOptions failed: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(ruleProviderDir, "cn.list"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "new.example\n" {
+		t.Fatalf("rule provider content = %q, want forced refresh", got)
+	}
+	info, err := os.Stat(filepath.Join(ruleProviderDir, "cn.list"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.ModTime().Before(before) {
+		t.Fatalf("rule provider mtime = %v, want >= %v", info.ModTime(), before)
+	}
+}
+
+func TestDownloadRuleProvidersIgnoreErrorsContinuesOtherProviders(t *testing.T) {
+	ruleProviderDir := t.TempDir()
+	okServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok.example\n"))
+	}))
+	defer okServer.Close()
+	badServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad", http.StatusInternalServerError)
+	}))
+	defer badServer.Close()
+
+	err := DownloadRuleProvidersWithOptions(map[string]string{
+		"bad": badServer.URL,
+		"ok":  okServer.URL,
+	}, DownloadRuleProviderOptions{
+		Dir:          ruleProviderDir,
+		Force:        true,
+		IgnoreErrors: true,
+	})
+	if err != nil {
+		t.Fatalf("DownloadRuleProvidersWithOptions failed: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(ruleProviderDir, "ok.list"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "ok.example\n" {
+		t.Fatalf("ok rule provider content = %q", got)
 	}
 }
 
