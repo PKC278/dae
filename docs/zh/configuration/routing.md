@@ -3,6 +3,18 @@
 ## 例子
 
 ```shell
+### 远程规则集
+# 在 global 中配置自动更新间隔。默认 0，表示禁用；支持 s（秒）和 d（天）两种单位。
+global {
+  rule_provider_update_interval: 7d
+}
+
+rule_provider {
+  cn:"https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/cn.list"
+}
+
+domain(rule-set:cn) -> direct
+
 ### 内置出站: block, direct, must_rules
 
 # must_rules 表示不将DNS流量重定向至dae并继续匹配。

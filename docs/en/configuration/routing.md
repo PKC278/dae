@@ -3,6 +3,18 @@
 ## Examples
 
 ```shell
+### Remote rule providers
+# Configure automatic updates in global. Default is 0, which disables it; supported units are s and d.
+global {
+  rule_provider_update_interval: 7d
+}
+
+rule_provider {
+  cn:"https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/cn.list"
+}
+
+domain(rule-set:cn) -> direct
+
 ### Built-in outbounds: block, direct, must_rules
 
 # must_rules means no redirecting DNS traffic to dae and continue to matching.

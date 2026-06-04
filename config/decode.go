@@ -8,7 +8,11 @@ package config
 import (
 	"fmt"
 	"reflect"
+	"strconv"
+	"strings"
+	"time"
 
+	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/pkg/config_parser"
 )
 
@@ -57,8 +61,50 @@ func decodeGlobalSection(conf *Config, section *config_parser.Section) error {
 	if err := SectionParser(reflect.ValueOf(&conf.Global), section); err != nil {
 		return err
 	}
+	if err := validateRuleProviderUpdateInterval(section); err != nil {
+		return err
+	}
 	conf.Global.SoMarkFromDaeSet = sectionHasParam(section, "so_mark_from_dae")
 	return nil
+}
+
+func validateRuleProviderUpdateInterval(section *config_parser.Section) error {
+	for _, item := range section.Items {
+		param, ok := item.Value.(*config_parser.Param)
+		if !ok || param.Key != "rule_provider_update_interval" {
+			continue
+		}
+		if _, err := parseRuleProviderUpdateInterval(param.Val); err != nil {
+			return fmt.Errorf("parse rule_provider_update_interval: %w", err)
+		}
+	}
+	return nil
+}
+
+func parseRuleProviderUpdateInterval(raw string) (time.Duration, error) {
+	value := strings.TrimSpace(raw)
+	if value == "0" {
+		return 0, nil
+	}
+	if len(value) < 2 {
+		return 0, fmt.Errorf("expected duration like 30s or 1d")
+	}
+	unit := value[len(value)-1]
+	if unit != 's' && unit != 'd' {
+		return 0, fmt.Errorf("unsupported unit %q, expected s or d", string(unit))
+	}
+	n, err := strconv.ParseInt(value[:len(value)-1], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid number %q: %w", value[:len(value)-1], err)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("must be non-negative")
+	}
+	duration, err := common.ParseDurationWithDays(value)
+	if err != nil {
+		return 0, err
+	}
+	return duration, nil
 }
 
 func decodeSubscriptionSection(conf *Config, section *config_parser.Section) error {

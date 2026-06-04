@@ -118,8 +118,32 @@ type ControlPlane struct {
 }
 
 type controlPlaneBuildOptions struct {
-	delayDatapathCommit   bool
-	delayDNSListenerStart bool
+	delayDatapathCommit       bool
+	delayDNSListenerStart     bool
+	forceRuleProviderDownload bool
+	ignoreRuleProviderErrors  bool
+}
+
+type ControlPlaneBuildOption interface {
+	applyControlPlaneBuildOption(*controlPlaneBuildOptions)
+}
+
+type controlPlaneBuildOptionFunc func(*controlPlaneBuildOptions)
+
+func (f controlPlaneBuildOptionFunc) applyControlPlaneBuildOption(opts *controlPlaneBuildOptions) {
+	f(opts)
+}
+
+func WithForceRuleProviderDownload(force bool) ControlPlaneBuildOption {
+	return controlPlaneBuildOptionFunc(func(opts *controlPlaneBuildOptions) {
+		opts.forceRuleProviderDownload = force
+	})
+}
+
+func WithIgnoreRuleProviderErrors(ignore bool) ControlPlaneBuildOption {
+	return controlPlaneBuildOptionFunc(func(opts *controlPlaneBuildOptions) {
+		opts.ignoreRuleProviderErrors = ignore
+	})
 }
 
 const (
@@ -304,7 +328,14 @@ func NewControlPlaneWithContext(
 	dnsConfig *config.Dns,
 	externGeoDataDirs []string,
 	ruleProviderDir string,
+	opts ...ControlPlaneBuildOption,
 ) (plane *ControlPlane, err error) {
+	buildOpts := controlPlaneBuildOptions{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt.applyControlPlaneBuildOption(&buildOpts)
+		}
+	}
 	return newControlPlaneWithContextOptions(
 		ctx,
 		log,
@@ -318,7 +349,7 @@ func NewControlPlaneWithContext(
 		dnsConfig,
 		externGeoDataDirs,
 		ruleProviderDir,
-		controlPlaneBuildOptions{},
+		buildOpts,
 	)
 }
 
@@ -337,7 +368,17 @@ func NewPreparedControlPlaneWithContext(
 	dnsConfig *config.Dns,
 	externGeoDataDirs []string,
 	ruleProviderDir string,
+	opts ...ControlPlaneBuildOption,
 ) (plane *ControlPlane, err error) {
+	buildOpts := controlPlaneBuildOptions{
+		delayDatapathCommit:   true,
+		delayDNSListenerStart: true,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt.applyControlPlaneBuildOption(&buildOpts)
+		}
+	}
 	return newControlPlaneWithContextOptions(
 		ctx,
 		log,
@@ -351,10 +392,7 @@ func NewPreparedControlPlaneWithContext(
 		dnsConfig,
 		externGeoDataDirs,
 		ruleProviderDir,
-		controlPlaneBuildOptions{
-			delayDatapathCommit:   true,
-			delayDNSListenerStart: true,
-		},
+		buildOpts,
 	)
 }
 
@@ -656,14 +694,21 @@ func newControlPlaneWithContextOptions(
 		outboundName2Id[o.Name] = uint8(i)
 		outboundId2Name[uint8(i)] = o.Name
 	}
-	if err = downloadRuleProvidersThroughRouting(log, locationFinder, routingA, ruleProviderMap, ruleProviderDir, outboundName2Id, outbounds, global); err != nil {
+	if err = downloadRuleProvidersThroughRouting(log, locationFinder, routingA, ruleProviderMap, ruleProviderDir, outboundName2Id, outbounds, global, buildOpts.forceRuleProviderDownload, buildOpts.ignoreRuleProviderErrors); err != nil {
 		return nil, fmt.Errorf("download rule providers: %w", err)
 	}
 	// Apply rules optimizers.
 	log.Infoln("Optimizing and loading routing rules (this may take a while for large rule sets)...")
 	routingProgram, err := routing.NewNormalizedProgram(routingA.Rules, routingA.Fallback,
 		&routing.AliasOptimizer{},
-		&routing.DatReaderOptimizer{Logger: log, LocationFinder: locationFinder, RuleProviders: ruleProviderMap, RuleProviderDir: ruleProviderDir},
+		&routing.DatReaderOptimizer{
+			Logger:                       log,
+			LocationFinder:               locationFinder,
+			RuleProviders:                ruleProviderMap,
+			RuleProviderDir:              ruleProviderDir,
+			RuleProviderDownloadDisabled: buildOpts.ignoreRuleProviderErrors,
+			SkipUnavailableRuleProviders: buildOpts.ignoreRuleProviderErrors,
+		},
 		&routing.MergeAndSortRulesOptimizer{},
 		&routing.DeduplicateParamsOptimizer{},
 	)
@@ -1540,6 +1585,8 @@ func downloadRuleProvidersThroughRouting(
 	outboundName2Id map[string]uint8,
 	outbounds []*outbound.DialerGroup,
 	global *config.Global,
+	force bool,
+	ignoreErrors bool,
 ) error {
 	if len(ruleProviderMap) == 0 {
 		return nil
@@ -1550,7 +1597,9 @@ func downloadRuleProvidersThroughRouting(
 		return fmt.Errorf("build rule provider download router: %w", err)
 	}
 	return routing.DownloadRuleProvidersWithOptions(ruleProviderMap, routing.DownloadRuleProviderOptions{
-		Dir: ruleProviderDir,
+		Dir:          ruleProviderDir,
+		Force:        force,
+		IgnoreErrors: ignoreErrors,
 		HTTPClientResolver: func(name string, rawURL string) (*http.Client, error) {
 			client, outboundName, err := ruleProviderHTTPClientFromRouting(rawURL, matcher, outbounds, global)
 			if err != nil {
