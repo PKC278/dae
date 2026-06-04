@@ -173,6 +173,8 @@ func matchScopeSpec(scope string) (scopeName, actionLabel string, err error) {
 		return "routing", "outbound", nil
 	case "dns_request":
 		return "dns_request", "upstream", nil
+	case "dns_response":
+		return "dns_response", "action", nil
 	default:
 		return "", "", fmt.Errorf("unsupported match scope: %v", scope)
 	}
@@ -384,7 +386,7 @@ func sourcedParamMatches(param sourcedParam, functionName string, target *config
 		return ipTargetParamMatches(param.param, target)
 	case consts.Function_Port, consts.Function_SourcePort:
 		return portTargetParamMatches(param.param, target)
-	case consts.Function_L4Proto, consts.Function_IpVersion, consts.Function_ProcessName, consts.Function_Dscp:
+	case consts.Function_L4Proto, consts.Function_IpVersion, consts.Function_ProcessName, consts.Function_Dscp, consts.Function_QType, consts.Function_Upstream:
 		return stringTargetParamMatches(param.param, target), nil
 	case consts.Function_Mac:
 		return macTargetParamMatches(param.param, target)

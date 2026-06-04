@@ -153,6 +153,54 @@ func TestMatchRulesMatchesInlinePortRange(t *testing.T) {
 	}
 }
 
+func TestMatchRulesMatchesInlineQType(t *testing.T) {
+	rules := []*config_parser.RoutingRule{{
+		AndFunctions: []*config_parser.Function{{
+			Name:   "qtype",
+			Params: []*config_parser.Param{{Val: "https"}},
+		}},
+		Outbound: config_parser.Function{Name: "alidns"},
+	}}
+	report, err := MatchRules(rules, "googledns", MatchInput{
+		Raw:      "qtype:https",
+		Scope:    "dns_request",
+		Function: &config_parser.Function{Name: "qtype", Params: []*config_parser.Param{{Val: "https"}}},
+	}, MatchOption{Logger: logrus.New()})
+	if err != nil {
+		t.Fatalf("MatchRules failed: %v", err)
+	}
+	if report.Hit == nil {
+		t.Fatal("expected hit")
+	}
+	if report.Action != "upstream" || report.Hit.Action != "alidns" {
+		t.Fatalf("unexpected report action=%q hit action=%q", report.Action, report.Hit.Action)
+	}
+}
+
+func TestMatchRulesMatchesInlineResponseUpstream(t *testing.T) {
+	rules := []*config_parser.RoutingRule{{
+		AndFunctions: []*config_parser.Function{{
+			Name:   "upstream",
+			Params: []*config_parser.Param{{Val: "googledns"}},
+		}},
+		Outbound: config_parser.Function{Name: "accept"},
+	}}
+	report, err := MatchRules(rules, "accept", MatchInput{
+		Raw:      "upstream:googledns",
+		Scope:    "dns_response",
+		Function: &config_parser.Function{Name: "upstream", Params: []*config_parser.Param{{Val: "googledns"}}},
+	}, MatchOption{Logger: logrus.New()})
+	if err != nil {
+		t.Fatalf("MatchRules failed: %v", err)
+	}
+	if report.Hit == nil {
+		t.Fatal("expected hit")
+	}
+	if report.Action != "action" || report.Hit.Action != "accept" {
+		t.Fatalf("unexpected report action=%q hit action=%q", report.Action, report.Hit.Action)
+	}
+}
+
 func TestMatchRulesContinuesAfterPartialHitUntilFullHit(t *testing.T) {
 	rules := []*config_parser.RoutingRule{
 		{
