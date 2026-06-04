@@ -8,10 +8,11 @@ package config
 type Desc map[string]string
 
 var SectionSummaryDesc = Desc{
-	"subscription": "Subscriptions defined here will be resolved as nodes and merged as a part of the global node pool.\nSupport to give the subscription a tag, and filter nodes from a given subscription in the group section.",
-	"node":         "Nodes defined here will be merged as a part of the global node pool.",
-	"dns":          "See more at https://github.com/daeuniverse/dae/blob/main/docs/en/configuration/dns.md.",
-	"group":        "Node group. Groups defined here can be used as outbounds in section \"routing\".",
+	"subscription":  "Subscriptions defined here will be resolved as nodes and merged as a part of the global node pool.\nSupport to give the subscription a tag, and filter nodes from a given subscription in the group section.",
+	"node":          "Nodes defined here will be merged as a part of the global node pool.",
+	"dns":           "See more at https://github.com/daeuniverse/dae/blob/main/docs/en/configuration/dns.md.",
+	"group":         "Node group. Groups defined here can be used as outbounds in section \"routing\".",
+	"rule_provider": "Remote mihomo-compatible rule sets referenced by routing rules as rule-set:name.\nExample: cn:\"https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/cn.list\"",
 	"routing": `Traffic follows this routing. See https://github.com/daeuniverse/dae/blob/main/docs/en/configuration/routing.md for full examples.
 Notice: domain traffic split will fail if DNS traffic is not taken over by dae.
 Built-in outbound: direct, must_direct, block. Use block(drop) to silently drop packets; plain block explicitly rejects the connection.
