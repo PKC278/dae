@@ -114,7 +114,7 @@ func MatchRules(
 		if !ok {
 			continue
 		}
-		hit.Rule = rule.String(false, true, false)
+		hit.Rule = formatMatchRule(rule)
 		hit.Action = rule.Outbound.String(true, false, true)
 		report.Hits = append(report.Hits, hit)
 		report.Hit = hit
@@ -123,6 +123,16 @@ func MatchRules(
 		}
 	}
 	return report, nil
+}
+
+func formatMatchRule(rule *config_parser.RoutingRule) string {
+	outbound := rule.Outbound.String(true, false, true)
+	ruleText := rule.String(false, true, false)
+	compactSuffix := "->" + outbound
+	if strings.HasSuffix(ruleText, compactSuffix) {
+		return strings.TrimSuffix(ruleText, compactSuffix) + " -> " + outbound
+	}
+	return ruleText
 }
 
 func cloneMatchFunction(f *config_parser.Function) *config_parser.Function {

@@ -53,6 +53,25 @@ func TestMatchRulesReportsRuleProviderDomainSource(t *testing.T) {
 	}
 }
 
+func TestFormatMatchRuleSpacesRuleArrow(t *testing.T) {
+	rule := &config_parser.RoutingRule{
+		AndFunctions: []*config_parser.Function{{
+			Name: "domain",
+			Params: []*config_parser.Param{
+				{Key: "rule-set", Val: "apple"},
+				{Key: "geosite", Val: "microsoft"},
+			},
+		}},
+		Outbound: config_parser.Function{Name: "direct"},
+	}
+
+	got := formatMatchRule(rule)
+	want := "domain(rule-set:apple,geosite:microsoft) -> direct"
+	if got != want {
+		t.Fatalf("formatMatchRule() = %q, want %q", got, want)
+	}
+}
+
 func TestMatchRulesReportsRuleProviderIPSource(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("1.1.8.0/24\n+.apple.com\n"))
