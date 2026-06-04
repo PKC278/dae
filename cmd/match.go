@@ -10,19 +10,24 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
+	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/assets"
+	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/component/routing"
 	"github.com/daeuniverse/dae/config"
 	"github.com/daeuniverse/dae/pkg/config_parser"
+	dnsmessage "github.com/miekg/dns"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
 
 var (
 	matchCmd = &cobra.Command{
-		Use:   "match -c CONFIG [domain:example.com|qname:example.com|ip:1.1.1.1|ipcidr:1.1.1.0/24|pname(NetworkManager)]",
+		Use:   "match -c CONFIG [function:value|dns.response.function:value]",
 		Short: "Test routing rule matches for a target function.",
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
@@ -76,6 +81,8 @@ func runMatch(cfgFile string, rawTarget string) error {
 		report, err = routing.MatchRules(conf.Routing.Rules, conf.Routing.Fallback, input, opt)
 	case "dns_request":
 		report, err = routing.MatchRules(conf.Dns.Routing.Request.Rules, conf.Dns.Routing.Request.Fallback, input, opt)
+	case "dns_response":
+		report, err = routing.MatchRules(conf.Dns.Routing.Response.Rules, conf.Dns.Routing.Response.Fallback, input, opt)
 	default:
 		err = fmt.Errorf("unsupported match scope: %v", input.Scope)
 	}
@@ -90,38 +97,248 @@ func parseMatchInput(raw string) (routing.MatchInput, error) {
 	if strings.Contains(raw, "(") {
 		return parseMatchFunctionInput(raw)
 	}
-	return parseLegacyMatchInput(raw)
+	return parseColonMatchInput(raw)
 }
 
-func parseLegacyMatchInput(raw string) (routing.MatchInput, error) {
-	key, value, ok := strings.Cut(raw, ":")
+func parseColonMatchInput(raw string) (routing.MatchInput, error) {
+	key, value, ok := strings.Cut(strings.TrimSpace(raw), ":")
 	if !ok || key == "" || value == "" {
-		return routing.MatchInput{}, fmt.Errorf("target must be like domain:example.com, qname:example.com, ip:1.1.1.1, ipcidr:1.1.1.0/24, or pname(NetworkManager)")
+		return routing.MatchInput{}, fmt.Errorf("target must be like domain:example.com, qname:example.com, ip:1.1.1.1, ipcidr:1.1.1.0/24, pname:NetworkManager, mac:02:42:ac:11:00:02, or dns.response.upstream:googledns")
 	}
+	key = strings.TrimSpace(key)
+	value = strings.TrimSpace(value)
+	explicitScope, key, err := parseMatchKeyScope(key)
+	if err != nil {
+		return routing.MatchInput{}, err
+	}
+
 	input := routing.MatchInput{Raw: raw, Scope: "routing"}
+	if explicitScope != "" {
+		input.Scope = explicitScope
+	}
 	switch key {
 	case string(routing.MatchTargetDomain):
-		input.Function = &config_parser.Function{Name: "domain", Params: []*config_parser.Param{{Key: "suffix", Val: strings.TrimSuffix(value, ".")}}}
-		return input, nil
+		if explicitScope != "" && explicitScope != "routing" {
+			return routing.MatchInput{}, fmt.Errorf("unsupported target type %q in scope %q", key, explicitScope)
+		}
+		return parseDomainLikeMatchInput(input, consts.Function_Domain, value)
 	case string(routing.MatchTargetQName):
-		input.Scope = "dns_request"
-		input.Function = &config_parser.Function{Name: "qname", Params: []*config_parser.Param{{Key: "suffix", Val: strings.TrimSuffix(value, ".")}}}
-		return input, nil
+		if explicitScope == "" {
+			input.Scope = "dns_request"
+		}
+		return parseDomainLikeMatchInput(input, consts.Function_QName, value)
 	case string(routing.MatchTargetIP):
+		if explicitScope == "dns_request" {
+			return routing.MatchInput{}, fmt.Errorf("unsupported target type %q in scope %q", key, explicitScope)
+		}
+		if isReferenceMatchValue(value) {
+			return routing.MatchInput{}, fmt.Errorf("unsupported reference target %q", key+":"+value)
+		}
 		if _, err := netip.ParseAddr(value); err != nil {
 			return routing.MatchInput{}, fmt.Errorf("invalid ip target %q: %w", value, err)
 		}
-		input.Function = &config_parser.Function{Name: "ip", Params: []*config_parser.Param{{Val: value}}}
-		return input, nil
+		input.Function = &config_parser.Function{Name: consts.Function_Ip, Params: []*config_parser.Param{{Val: value}}}
+		return finalizeMatchInput(input)
 	case string(routing.MatchTargetIPCIDR):
+		if explicitScope == "dns_request" {
+			return routing.MatchInput{}, fmt.Errorf("unsupported target type %q in scope %q", key, explicitScope)
+		}
+		if isReferenceMatchValue(value) {
+			return routing.MatchInput{}, fmt.Errorf("unsupported reference target %q", key+":"+value)
+		}
 		if _, err := netip.ParsePrefix(value); err != nil {
 			return routing.MatchInput{}, fmt.Errorf("invalid ipcidr target %q: %w", value, err)
 		}
-		input.Function = &config_parser.Function{Name: "ip", Params: []*config_parser.Param{{Val: value}}}
-		return input, nil
+		input.Function = &config_parser.Function{Name: consts.Function_Ip, Params: []*config_parser.Param{{Val: value}}}
+		return finalizeMatchInput(input)
+	case "dip", "sip":
+		if explicitScope != "" && explicitScope != "routing" {
+			return routing.MatchInput{}, fmt.Errorf("unsupported target type %q in scope %q", key, explicitScope)
+		}
+		if isReferenceMatchValue(value) {
+			return routing.MatchInput{}, fmt.Errorf("unsupported reference target %q", key+":"+value)
+		}
+		if _, err := parseAddrOrPrefix(value); err != nil {
+			return routing.MatchInput{}, fmt.Errorf("invalid %s target %q: %w", key, value, err)
+		}
+		input.Function = &config_parser.Function{Name: key, Params: []*config_parser.Param{{Val: value}}}
+		return finalizeMatchInput(input)
+	case "port", "dport", "sport":
+		if explicitScope != "" && explicitScope != "routing" {
+			return routing.MatchInput{}, fmt.Errorf("unsupported target type %q in scope %q", key, explicitScope)
+		}
+		if _, err := common.ParsePortRange(value); err != nil {
+			return routing.MatchInput{}, fmt.Errorf("invalid %s target %q: %w", key, value, err)
+		}
+		input.Function = &config_parser.Function{Name: key, Params: []*config_parser.Param{{Val: value}}}
+		return finalizeMatchInput(input)
+	case consts.Function_L4Proto:
+		if explicitScope != "" && explicitScope != "routing" {
+			return routing.MatchInput{}, fmt.Errorf("unsupported target type %q in scope %q", key, explicitScope)
+		}
+		switch strings.ToLower(value) {
+		case "tcp", "udp":
+		default:
+			return routing.MatchInput{}, fmt.Errorf("invalid l4proto target %q", value)
+		}
+		input.Function = &config_parser.Function{Name: key, Params: []*config_parser.Param{{Val: strings.ToLower(value)}}}
+		return finalizeMatchInput(input)
+	case consts.Function_IpVersion:
+		if explicitScope != "" && explicitScope != "routing" {
+			return routing.MatchInput{}, fmt.Errorf("unsupported target type %q in scope %q", key, explicitScope)
+		}
+		switch value {
+		case "4", "6":
+		default:
+			return routing.MatchInput{}, fmt.Errorf("invalid ipversion target %q", value)
+		}
+		input.Function = &config_parser.Function{Name: key, Params: []*config_parser.Param{{Val: value}}}
+		return finalizeMatchInput(input)
+	case consts.Function_Mac:
+		if explicitScope != "" && explicitScope != "routing" {
+			return routing.MatchInput{}, fmt.Errorf("unsupported target type %q in scope %q", key, explicitScope)
+		}
+		if _, err := common.ParseMac(value); err != nil {
+			return routing.MatchInput{}, fmt.Errorf("invalid mac target %q: %w", value, err)
+		}
+		input.Function = &config_parser.Function{Name: key, Params: []*config_parser.Param{{Val: value}}}
+		return finalizeMatchInput(input)
+	case consts.Function_ProcessName:
+		if explicitScope != "" && explicitScope != "routing" {
+			return routing.MatchInput{}, fmt.Errorf("unsupported target type %q in scope %q", key, explicitScope)
+		}
+		input.Function = &config_parser.Function{Name: key, Params: []*config_parser.Param{{Val: value}}}
+		return finalizeMatchInput(input)
+	case consts.Function_Dscp:
+		if explicitScope != "" && explicitScope != "routing" {
+			return routing.MatchInput{}, fmt.Errorf("unsupported target type %q in scope %q", key, explicitScope)
+		}
+		if _, err := strconv.ParseUint(value, 0, 8); err != nil {
+			return routing.MatchInput{}, fmt.Errorf("invalid dscp target %q: %w", value, err)
+		}
+		input.Function = &config_parser.Function{Name: key, Params: []*config_parser.Param{{Val: value}}}
+		return finalizeMatchInput(input)
+	case consts.Function_QType:
+		if explicitScope == "" {
+			input.Scope = "dns_request"
+		}
+		qtype := strings.ToLower(value)
+		if _, err := strconv.ParseUint(value, 0, 16); err == nil {
+			qtype = value
+		} else if _, ok := dnsmessage.StringToType[strings.ToUpper(value)]; !ok {
+			return routing.MatchInput{}, fmt.Errorf("invalid qtype target %q", value)
+		}
+		input.Function = &config_parser.Function{Name: key, Params: []*config_parser.Param{{Val: qtype}}}
+		return finalizeMatchInput(input)
+	case consts.Function_Upstream:
+		if explicitScope == "" {
+			input.Scope = "dns_response"
+		}
+		input.Function = &config_parser.Function{Name: key, Params: []*config_parser.Param{{Val: value}}}
+		return finalizeMatchInput(input)
 	default:
 		return routing.MatchInput{}, fmt.Errorf("unsupported target type %q", key)
 	}
+}
+
+func parseMatchKeyScope(key string) (scope string, name string, err error) {
+	switch {
+	case strings.HasPrefix(key, "routing."):
+		return "routing", strings.TrimPrefix(key, "routing."), nil
+	case strings.HasPrefix(key, "dns_request."):
+		return "dns_request", strings.TrimPrefix(key, "dns_request."), nil
+	case strings.HasPrefix(key, "dns.request."):
+		return "dns_request", strings.TrimPrefix(key, "dns.request."), nil
+	case strings.HasPrefix(key, "dns_response."):
+		return "dns_response", strings.TrimPrefix(key, "dns_response."), nil
+	case strings.HasPrefix(key, "dns.response."):
+		return "dns_response", strings.TrimPrefix(key, "dns.response."), nil
+	default:
+		return "", key, nil
+	}
+}
+
+func finalizeMatchInput(input routing.MatchInput) (routing.MatchInput, error) {
+	if input.Function == nil {
+		return routing.MatchInput{}, fmt.Errorf("match target function is nil")
+	}
+	if !matchFunctionAllowed(input.Scope, input.Function.Name) {
+		return routing.MatchInput{}, fmt.Errorf("unsupported match function %q in scope %q", input.Function.Name, input.Scope)
+	}
+	return input, nil
+}
+
+func parseDomainLikeMatchInput(input routing.MatchInput, name string, value string) (routing.MatchInput, error) {
+	key, val := splitDomainMatchValue(value)
+	if isReferenceMatchKey(key) {
+		return routing.MatchInput{}, fmt.Errorf("unsupported reference target %q", name+":"+value)
+	}
+	if key == "" {
+		key = string(consts.RoutingDomainKey_Suffix)
+	}
+	switch consts.RoutingDomainKey(key) {
+	case consts.RoutingDomainKey_Suffix, consts.RoutingDomainKey_Full, consts.RoutingDomainKey_Keyword:
+	case consts.RoutingDomainKey_Regex:
+		if _, err := regexp.Compile(val); err != nil {
+			return routing.MatchInput{}, fmt.Errorf("invalid %s regex target %q: %w", name, val, err)
+		}
+	default:
+		return routing.MatchInput{}, fmt.Errorf("unsupported %s target key %q", name, key)
+	}
+	if key == string(consts.RoutingDomainKey_Suffix) || key == string(consts.RoutingDomainKey_Full) {
+		val = strings.TrimSuffix(val, ".")
+	}
+	input.Function = &config_parser.Function{Name: name, Params: []*config_parser.Param{{Key: key, Val: val}}}
+	return finalizeMatchInput(input)
+}
+
+func splitDomainMatchValue(value string) (key string, val string) {
+	key, val, ok := strings.Cut(value, ":")
+	if !ok {
+		return "", value
+	}
+	switch key {
+	case string(consts.RoutingDomainKey_Suffix),
+		string(consts.RoutingDomainKey_Full),
+		string(consts.RoutingDomainKey_Keyword),
+		string(consts.RoutingDomainKey_Regex),
+		"rule-set", "geosite", "geoip", "ext":
+		return key, val
+	default:
+		return "", value
+	}
+}
+
+func isReferenceMatchValue(value string) bool {
+	key, _, ok := strings.Cut(value, ":")
+	return ok && isReferenceMatchKey(key)
+}
+
+func isReferenceMatchKey(key string) bool {
+	switch key {
+	case "rule-set", "geosite", "geoip", "ext":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseAddrOrPrefix(value string) (netip.Prefix, error) {
+	if strings.Contains(value, "/") {
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			return netip.Prefix{}, err
+		}
+		return prefix, nil
+	}
+	addr, err := netip.ParseAddr(value)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	if addr.Is4() {
+		return netip.PrefixFrom(addr, 32), nil
+	}
+	return netip.PrefixFrom(addr, 128), nil
 }
 
 func parseMatchFunctionInput(raw string) (routing.MatchInput, error) {
@@ -158,6 +375,13 @@ func matchFunctionAllowed(scope string, name string) bool {
 	switch scope {
 	case "dns_request":
 		return name == "qname" || name == "qtype"
+	case "dns_response":
+		switch name {
+		case "qname", "qtype", "ip", "upstream":
+			return true
+		default:
+			return false
+		}
 	case "routing":
 		switch name {
 		case "domain", "ip", "sip", "port", "sport", "l4proto", "ipversion", "mac", "pname", "dscp", "dip", "dport":
