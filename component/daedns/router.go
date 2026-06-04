@@ -71,7 +71,39 @@ type lookupCall struct {
 }
 
 type NewOption struct {
-	LocationFinder *assets.LocationFinder
+	LocationFinder               *assets.LocationFinder
+	RuleProviders                map[string]string
+	RuleProviderDir              string
+	RuleProviderDownloadDisabled bool
+	SkipUnavailableRuleProviders bool
+}
+
+func optRuleProviders(opt *NewOption) map[string]string {
+	if opt == nil {
+		return nil
+	}
+	return opt.RuleProviders
+}
+
+func optRuleProviderDir(opt *NewOption) string {
+	if opt == nil {
+		return ""
+	}
+	return opt.RuleProviderDir
+}
+
+func optRuleProviderDownloadDisabled(opt *NewOption) bool {
+	if opt == nil {
+		return false
+	}
+	return opt.RuleProviderDownloadDisabled
+}
+
+func optSkipUnavailableRuleProviders(opt *NewOption) bool {
+	if opt == nil {
+		return false
+	}
+	return opt.SkipUnavailableRuleProviders
 }
 
 type compiledMatcher[T any] struct {
@@ -116,7 +148,14 @@ func NewWithOption(log *logrus.Logger, global *config.Global, dnsCfg *config.Dns
 		locationFinder = opt.LocationFinder
 	}
 	requestProgram, err := componentdns.NewNormalizedRequestRoutingProgram(dnsCfg.Routing.Request.Rules, dnsCfg.Routing.Request.Fallback,
-		&routing.DatReaderOptimizer{Logger: log, LocationFinder: locationFinder},
+		&routing.DatReaderOptimizer{
+			Logger:                       log,
+			LocationFinder:               locationFinder,
+			RuleProviders:                optRuleProviders(opt),
+			RuleProviderDir:              optRuleProviderDir(opt),
+			RuleProviderDownloadDisabled: optRuleProviderDownloadDisabled(opt),
+			SkipUnavailableRuleProviders: optSkipUnavailableRuleProviders(opt),
+		},
 		&routing.MergeAndSortRulesOptimizer{},
 		&routing.DeduplicateParamsOptimizer{},
 	)

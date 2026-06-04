@@ -35,6 +35,8 @@ type Dns struct {
 type NewOption struct {
 	Logger                  *logrus.Logger
 	LocationFinder          *assets.LocationFinder
+	RuleProviders           map[string]string
+	RuleProviderDir         string
 	UpstreamReadyCallback   func(dnsUpstream *Upstream) (err error)
 	UpstreamResolverNetwork string
 	UpstreamHostResolver    func(ctx context.Context, host string, network string) (*netutils.Ip46, error, error)
@@ -83,7 +85,7 @@ func New(dns *config.Dns, opt *NewOption) (s *Dns, err error) {
 		s.upstream = append(s.upstream, r)
 	}
 	requestProgram, err := NewNormalizedRequestRoutingProgram(dns.Routing.Request.Rules, dns.Routing.Request.Fallback,
-		&routing.DatReaderOptimizer{Logger: opt.Logger, LocationFinder: opt.LocationFinder},
+		&routing.DatReaderOptimizer{Logger: opt.Logger, LocationFinder: opt.LocationFinder, RuleProviders: opt.RuleProviders, RuleProviderDir: opt.RuleProviderDir},
 		&routing.MergeAndSortRulesOptimizer{},
 		&routing.DeduplicateParamsOptimizer{},
 	)
@@ -92,7 +94,7 @@ func New(dns *config.Dns, opt *NewOption) (s *Dns, err error) {
 	}
 
 	responseProgram, err := routing.NewNormalizedProgram(dns.Routing.Response.Rules, dns.Routing.Response.Fallback,
-		&routing.DatReaderOptimizer{Logger: opt.Logger, LocationFinder: opt.LocationFinder},
+		&routing.DatReaderOptimizer{Logger: opt.Logger, LocationFinder: opt.LocationFinder, RuleProviders: opt.RuleProviders, RuleProviderDir: opt.RuleProviderDir},
 		&routing.MergeAndSortRulesOptimizer{},
 		&routing.DeduplicateParamsOptimizer{},
 	)
