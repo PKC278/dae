@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/pkg/config_parser"
@@ -192,6 +193,12 @@ func (m *Marshaller) marshalLeaf(key string, from reflect.Value, depth int) (err
 		}
 	default:
 		switch val := from.Interface().(type) {
+		case time.Duration:
+			if key == "rule_provider_update_interval" {
+				m.writeLine(depth, key+":"+strconv.Quote(formatRuleProviderUpdateInterval(val)))
+				return nil
+			}
+			m.writeLine(depth, key+":"+strconv.Quote(fmt.Sprintf("%v", val)))
 		case fmt.Stringer, string,
 			uint,
 			uint8, uint16, uint32, uint64,
@@ -208,6 +215,18 @@ func (m *Marshaller) marshalLeaf(key string, from reflect.Value, depth int) (err
 	}
 	return nil
 }
+
+func formatRuleProviderUpdateInterval(d time.Duration) string {
+	if d == 0 {
+		return "0"
+	}
+	const day = 24 * time.Hour
+	if d%day == 0 {
+		return strconv.FormatInt(int64(d/day), 10) + "d"
+	}
+	return strconv.FormatInt(int64(d/time.Second), 10) + "s"
+}
+
 func (m *Marshaller) marshalParam(from reflect.Value, depth int) (err error) {
 	if from.Kind() != reflect.Struct {
 		return fmt.Errorf("marshalParam can only marshal struct")

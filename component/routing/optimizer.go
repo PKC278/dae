@@ -172,6 +172,7 @@ type DatReaderOptimizer struct {
 	RuleProviderDir                string
 	RuleProviderHTTPClientResolver RuleProviderHTTPClientResolver
 	RuleProviderDownloadDisabled   bool
+	RuleProviderDownloadForced     bool
 	SkipUnavailableRuleProviders   bool
 	mu                             sync.Mutex
 	// Cached params are immutable by contract once stored.
@@ -236,12 +237,18 @@ func (o *DatReaderOptimizer) storeRuleProviderContent(name string, content []byt
 	if err = os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("store rule provider file %q: %w", path, err)
 	}
+	now := time.Now()
+	if err = os.Chtimes(path, now, now); err != nil {
+		return fmt.Errorf("set rule provider file time %q: %w", path, err)
+	}
 	return nil
 }
 
 type DownloadRuleProviderOptions struct {
 	Dir                string
 	HTTPClientResolver RuleProviderHTTPClientResolver
+	Force              bool
+	IgnoreErrors       bool
 }
 
 func DownloadRuleProviders(ruleProviders map[string]string, dir string) error {
@@ -261,9 +268,13 @@ func DownloadRuleProvidersWithOptions(ruleProviders map[string]string, opt Downl
 		RuleProviders:                  ruleProviders,
 		RuleProviderDir:                opt.Dir,
 		RuleProviderHTTPClientResolver: opt.HTTPClientResolver,
+		RuleProviderDownloadForced:     opt.Force,
 	}
 	for _, name := range names {
 		if _, err := optimizer.loadRuleProviderContent(name); err != nil {
+			if opt.IgnoreErrors {
+				continue
+			}
 			return err
 		}
 	}
@@ -336,13 +347,13 @@ func (o *DatReaderOptimizer) loadRuleProviderContent(name string) ([]byte, error
 
 	o.mu.Lock()
 	o.initCacheLocked()
-	if cached, ok := o.ruleProviderCache[name]; ok {
+	if cached, ok := o.ruleProviderCache[name]; ok && !o.RuleProviderDownloadForced {
 		o.mu.Unlock()
 		return cached, nil
 	}
 	o.mu.Unlock()
 
-	if b, ok := readTextRuleProviderFile(o.ruleProviderPath(name)); ok {
+	if b, ok := readTextRuleProviderFile(o.ruleProviderPath(name)); ok && !o.RuleProviderDownloadForced {
 		o.mu.Lock()
 		o.initCacheLocked()
 		o.ruleProviderCache[name] = b

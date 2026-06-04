@@ -7,6 +7,7 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"github.com/daeuniverse/dae/pkg/config_parser"
 	"github.com/stretchr/testify/require"
@@ -112,4 +113,56 @@ routing {}
 	_, err = New(sections)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "duplicated key")
+}
+
+func TestRuleProviderUpdateIntervalSupportsSecondsAndDays(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want time.Duration
+	}{
+		{name: "seconds", raw: "30s", want: 30 * time.Second},
+		{name: "days", raw: "2d", want: 48 * time.Hour},
+		{name: "disabled", raw: "0", want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sections, err := config_parser.Parse(`
+global {
+  rule_provider_update_interval: ` + tc.raw + `
+}
+routing {}
+`)
+			require.NoError(t, err)
+
+			conf, err := New(sections)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, conf.Global.RuleProviderUpdateInterval)
+		})
+	}
+}
+
+func TestRuleProviderUpdateIntervalDefaultsToDisabled(t *testing.T) {
+	sections, err := config_parser.Parse(`
+global {}
+routing {}
+`)
+	require.NoError(t, err)
+
+	conf, err := New(sections)
+	require.NoError(t, err)
+	require.Equal(t, time.Duration(0), conf.Global.RuleProviderUpdateInterval)
+}
+
+func TestRuleProviderUpdateIntervalRejectsUnsupportedUnit(t *testing.T) {
+	sections, err := config_parser.Parse(`
+global {
+  rule_provider_update_interval: 1m
+}
+routing {}
+`)
+	require.NoError(t, err)
+
+	_, err = New(sections)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "expected s or d")
 }

@@ -94,9 +94,11 @@ type signalShutdownStagedHandoff struct {
 }
 
 type reloadRequest struct {
-	isSuspend       bool
-	requestedAt     time.Time
-	requestedAtMono uint64
+	isSuspend                 bool
+	forceRuleProviderDownload bool
+	ignoreRuleProviderErrors  bool
+	requestedAt               time.Time
+	requestedAtMono           uint64
 }
 
 type reloadRetirementControlPlane interface {
@@ -312,6 +314,136 @@ func Run(log *logrus.Logger, conf *config.Config, externGeoDataDirs []string) (e
 	return newRunner(log, conf, externGeoDataDirs).Run()
 }
 
+type ruleProviderUpdateLoop struct {
+	updates chan time.Duration
+	stop    context.CancelFunc
+}
+
+func (l *ruleProviderUpdateLoop) Update(interval time.Duration) {
+	if l == nil {
+		return
+	}
+	select {
+	case l.updates <- interval:
+	default:
+		select {
+		case <-l.updates:
+		default:
+		}
+		l.updates <- interval
+	}
+}
+
+func (l *ruleProviderUpdateLoop) Stop() {
+	if l != nil && l.stop != nil {
+		l.stop()
+	}
+}
+
+func ruleProviderUpdateInterval(conf *config.Config) time.Duration {
+	if conf == nil || len(conf.RuleProvider) == 0 {
+		return 0
+	}
+	return conf.Global.RuleProviderUpdateInterval
+}
+
+func ruleProviderUpdateDelay(conf *config.Config, allowImmediate bool) time.Duration {
+	interval := ruleProviderUpdateInterval(conf)
+	if interval <= 0 {
+		return 0
+	}
+	ruleProviders, err := config.KeyableStringMap(conf.RuleProvider)
+	if err != nil || len(ruleProviders) == 0 {
+		return 0
+	}
+	ruleProviderDir := filepath.Join(filepath.Dir(cfgFile), "rules")
+	now := time.Now()
+	delay := interval
+	for name := range ruleProviders {
+		info, statErr := os.Stat(filepath.Join(ruleProviderDir, name+".list"))
+		if statErr != nil {
+			continue
+		}
+		remaining := info.ModTime().Add(interval).Sub(now)
+		if remaining <= 0 {
+			if allowImmediate {
+				return time.Nanosecond
+			}
+			return interval
+		}
+		if remaining < delay {
+			delay = remaining
+		}
+	}
+	return delay
+}
+
+func startRuleProviderUpdateLoop(log *logrus.Logger, reloadManager *reloadManager, initialDelay time.Duration) *ruleProviderUpdateLoop {
+	ctx, cancel := context.WithCancel(context.Background())
+	loop := &ruleProviderUpdateLoop{
+		updates: make(chan time.Duration, 1),
+		stop:    cancel,
+	}
+	go func() {
+		delay := initialDelay
+		var timer *time.Timer
+		var timerCh <-chan time.Time
+		resetTimer := func() {
+			if timer != nil {
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer = nil
+				timerCh = nil
+			}
+			if delay > 0 {
+				timer = time.NewTimer(delay)
+				timerCh = timer.C
+				if log != nil {
+					log.Infof("[RuleProvider] Next automatic update in %v", delay)
+				}
+			}
+		}
+		resetTimer()
+		defer func() {
+			if timer != nil {
+				timer.Stop()
+			}
+		}()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case next := <-loop.updates:
+				if next == delay {
+					continue
+				}
+				delay = next
+				resetTimer()
+			case <-timerCh:
+				if log != nil {
+					log.Warnln("[RuleProvider] Automatic update interval reached; queue reload")
+				}
+				if reloadManager != nil {
+					reloadManager.queueReloadRequest(log, reloadRequest{
+						forceRuleProviderDownload: true,
+						ignoreRuleProviderErrors:  true,
+						requestedAt:               time.Now(),
+						requestedAtMono:           monotonicNowNano(),
+					})
+				}
+				delay = 0
+				resetTimer()
+			}
+		}
+	}()
+	return loop
+}
+
 func (r *Runner) Run() (err error) {
 	log := r.log
 	conf := r.conf
@@ -326,7 +458,7 @@ func (r *Runner) Run() (err error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	currCancel = cancel
 	configureTransparentHugePages(log, conf.Global.DisableTHP)
-	c, err := newControlPlane(ctx, log, nil, nil, conf, externGeoDataDirs)
+	c, err := newControlPlane(ctx, log, nil, nil, conf, externGeoDataDirs, false, false)
 	if err != nil {
 		cancel()
 		return err
@@ -382,6 +514,8 @@ func (r *Runner) Run() (err error) {
 
 	reloadReqs := make(chan reloadRequest, 1)
 	reloadManager := newReloadManager(reloadReqs, runStateChanges, sigs)
+	autoRuleProviderUpdater := startRuleProviderUpdateLoop(log, reloadManager, ruleProviderUpdateDelay(conf, true))
+	defer autoRuleProviderUpdater.Stop()
 	fastExit := false
 
 	go func() {
@@ -469,7 +603,7 @@ func (r *Runner) Run() (err error) {
 			if stagedHotHandoff {
 				log.Warnln("[Reload] Prepare staged same-port handoff")
 				ctx, cancel := context.WithTimeout(context.Background(), reloadPrepareTimeout)
-				newC, prepareErr := newPreparedControlPlane(ctx, log, obj, dnsCache, newConf, externGeoDataDirs)
+				newC, prepareErr := newPreparedControlPlane(ctx, log, obj, dnsCache, newConf, externGeoDataDirs, req.forceRuleProviderDownload, req.ignoreRuleProviderErrors)
 				dnsCache = nil
 				if prepareErr != nil {
 					reloadErr := wrapReloadTimeoutError("prepare staged reload", prepareErr, reloadPrepareTimeout)
@@ -533,7 +667,7 @@ func (r *Runner) Run() (err error) {
 
 			log.Warnln("[Reload] Load new control plane")
 			ctx, cancel := context.WithTimeout(context.Background(), reloadPrepareTimeout)
-			newC, err := newControlPlane(ctx, log, obj, dnsCache, newConf, externGeoDataDirs)
+			newC, err := newControlPlane(ctx, log, obj, dnsCache, newConf, externGeoDataDirs, req.forceRuleProviderDownload, req.ignoreRuleProviderErrors)
 			dnsCache = nil // Allow previous generation's clone to be GC'd.
 
 			var newCancel context.CancelFunc
@@ -550,7 +684,7 @@ func (r *Runner) Run() (err error) {
 					obj = nil
 				}
 				ctx, cancel = context.WithTimeout(context.Background(), reloadPrepareTimeout)
-				newC, err = newControlPlane(ctx, log, obj, rollbackDNSCache, conf, externGeoDataDirs)
+				newC, err = newControlPlane(ctx, log, obj, rollbackDNSCache, conf, externGeoDataDirs, false, false)
 				err = wrapReloadTimeoutError("rollback control plane", err, reloadPrepareTimeout)
 				if err != nil {
 					_ = sdnotify.Stopping()
@@ -737,6 +871,7 @@ loop:
 					} else {
 						_ = setRunSignalProgress(consts.ReloadError, reloadErr.Error())
 					}
+					autoRuleProviderUpdater.Update(ruleProviderUpdateDelay(conf, false))
 					log.Warnln("[Reload] Finished")
 					reloadManager.finishReloadSuccess()
 					continue
@@ -824,6 +959,7 @@ loop:
 				} else {
 					_ = setRunSignalProgress(consts.ReloadError, reloadErr.Error())
 				}
+				autoRuleProviderUpdater.Update(ruleProviderUpdateDelay(conf, false))
 				log.Warnln("[Reload] Finished")
 				reloadManager.finishReloadSuccess()
 				if dnsHandoffActive && log.IsLevelEnabled(logrus.DebugLevel) {
@@ -1107,12 +1243,12 @@ func shutdownAfterSignalWithHandoff(
 	return nil
 }
 
-func newControlPlane(ctx context.Context, log *logrus.Logger, bpf any, dnsCache map[string]*control.DnsCache, conf *config.Config, externGeoDataDirs []string) (c *control.ControlPlane, err error) {
-	return newControlPlaneWithMode(ctx, log, bpf, dnsCache, conf, externGeoDataDirs, false)
+func newControlPlane(ctx context.Context, log *logrus.Logger, bpf any, dnsCache map[string]*control.DnsCache, conf *config.Config, externGeoDataDirs []string, forceRuleProviderDownload bool, ignoreRuleProviderErrors bool) (c *control.ControlPlane, err error) {
+	return newControlPlaneWithMode(ctx, log, bpf, dnsCache, conf, externGeoDataDirs, false, forceRuleProviderDownload, ignoreRuleProviderErrors)
 }
 
-func newPreparedControlPlane(ctx context.Context, log *logrus.Logger, bpf any, dnsCache map[string]*control.DnsCache, conf *config.Config, externGeoDataDirs []string) (c *control.ControlPlane, err error) {
-	return newControlPlaneWithMode(ctx, log, bpf, dnsCache, conf, externGeoDataDirs, true)
+func newPreparedControlPlane(ctx context.Context, log *logrus.Logger, bpf any, dnsCache map[string]*control.DnsCache, conf *config.Config, externGeoDataDirs []string, forceRuleProviderDownload bool, ignoreRuleProviderErrors bool) (c *control.ControlPlane, err error) {
+	return newControlPlaneWithMode(ctx, log, bpf, dnsCache, conf, externGeoDataDirs, true, forceRuleProviderDownload, ignoreRuleProviderErrors)
 }
 
 func configureTransparentHugePages(log *logrus.Logger, disable bool) {
@@ -1134,7 +1270,7 @@ func configureTransparentHugePages(log *logrus.Logger, disable bool) {
 	}
 }
 
-func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, dnsCache map[string]*control.DnsCache, conf *config.Config, externGeoDataDirs []string, prepareOnly bool) (c *control.ControlPlane, err error) {
+func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, dnsCache map[string]*control.DnsCache, conf *config.Config, externGeoDataDirs []string, prepareOnly bool, forceRuleProviderDownload bool, ignoreRuleProviderErrors bool) (c *control.ControlPlane, err error) {
 	// Deep copy to prevent modification.
 	conf = deepcopy.Copy(conf).(*config.Config)
 	if conf.Global.SoMarkFromDae == 0 {
@@ -1333,6 +1469,13 @@ func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, d
 	log.Infoln("Building control plane and routing rules...")
 	stageStart = time.Now()
 	if prepareOnly {
+		opts := []control.ControlPlaneBuildOption{}
+		if forceRuleProviderDownload {
+			opts = append(opts, control.WithForceRuleProviderDownload(true))
+		}
+		if ignoreRuleProviderErrors {
+			opts = append(opts, control.WithIgnoreRuleProviderErrors(true))
+		}
 		c, err = control.NewPreparedControlPlaneWithContext(
 			ctx,
 			log,
@@ -1346,8 +1489,16 @@ func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, d
 			&conf.Dns,
 			externGeoDataDirs,
 			ruleProviderDir,
+			opts...,
 		)
 	} else {
+		opts := []control.ControlPlaneBuildOption{}
+		if forceRuleProviderDownload {
+			opts = append(opts, control.WithForceRuleProviderDownload(true))
+		}
+		if ignoreRuleProviderErrors {
+			opts = append(opts, control.WithIgnoreRuleProviderErrors(true))
+		}
 		c, err = control.NewControlPlaneWithContext(
 			ctx,
 			log,
@@ -1361,6 +1512,7 @@ func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, d
 			&conf.Dns,
 			externGeoDataDirs,
 			ruleProviderDir,
+			opts...,
 		)
 	}
 	if err != nil {
