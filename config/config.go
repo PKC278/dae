@@ -7,8 +7,10 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/pkg/config_parser"
 )
 
@@ -148,6 +150,24 @@ type DnsRouting struct {
 }
 type KeyableString string
 
+func KeyableStringMap(values []KeyableString) (map[string]string, error) {
+	m := make(map[string]string, len(values))
+	for _, value := range values {
+		key, val := common.GetTagFromLinkLikePlaintext(string(value))
+		if key == "" {
+			return nil, fmt.Errorf("missing key in %q", value)
+		}
+		if key == "." || key == ".." || strings.ContainsAny(key, `/\`) {
+			return nil, fmt.Errorf("invalid key %q", key)
+		}
+		if _, ok := m[key]; ok {
+			return nil, fmt.Errorf("duplicated key %q", key)
+		}
+		m[key] = val
+	}
+	return m, nil
+}
+
 // Dns is intentionally mirrored by cmd.dnsConfigFingerprint for staged reload
 // DNS reuse decisions. Keep that fingerprint in sync with any new top-level
 // fields; TestDNSConfigFingerprintCoversAllDnsFields guards the contract.
@@ -172,6 +192,7 @@ type Config struct {
 	Subscription []KeyableString `mapstructure:"subscription"`
 	Node         []KeyableString `mapstructure:"node"`
 	Group        []Group         `mapstructure:"group" desc:"GroupDesc"`
+	RuleProvider []KeyableString `mapstructure:"rule_provider"`
 	Routing      Routing         `mapstructure:"routing" required:""`
 	Dns          Dns             `mapstructure:"dns" desc:"DnsDesc"`
 }

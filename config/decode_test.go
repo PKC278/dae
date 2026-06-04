@@ -34,7 +34,12 @@ group {
   }
 }
 
+rule_provider {
+  cn: "https://example.com/cn.list"
+}
+
 routing {
+  domain(rule-set:cn) -> direct
   pname(NetworkManager) -> direct
   fallback: proxy
 }
@@ -64,6 +69,7 @@ dns {
 	require.Len(t, conf.Node, 1)
 	require.Len(t, conf.Group, 1)
 	require.Equal(t, "proxy", conf.Group[0].Name)
+	require.Equal(t, []KeyableString{"cn:https://example.com/cn.list"}, conf.RuleProvider)
 	require.Equal(t, 6, conf.Dns.IpVersionPrefer)
 	require.NotNil(t, conf.Routing.Fallback)
 	require.NotNil(t, conf.Dns.Routing.Request.Fallback)
@@ -90,4 +96,20 @@ func TestDecodeConfigSectionRejectsUnknownSection(t *testing.T) {
 	err := decodeConfigSection(conf, "unknown", &config_parser.Section{Name: "unknown"})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unknown section")
+}
+
+func TestRuleProviderRejectsDuplicateName(t *testing.T) {
+	sections, err := config_parser.Parse(`
+global {}
+rule_provider {
+  cn: "https://example.com/cn.list"
+  cn: "https://example.com/cn2.list"
+}
+routing {}
+`)
+	require.NoError(t, err)
+
+	_, err = New(sections)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "duplicated key")
 }

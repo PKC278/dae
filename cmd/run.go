@@ -1161,7 +1161,18 @@ func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, d
 	direct.InitDirectDialers(conf.Global.FallbackResolver)
 	netutils.FallbackDns = netip.MustParseAddrPort(conf.Global.FallbackResolver)
 	locationFinder := assets.NewLocationFinder(externGeoDataDirs)
-	daeDNSRouter, err := daedns.NewWithOption(log, &conf.Global, &conf.Dns, &daedns.NewOption{LocationFinder: locationFinder})
+	ruleProviderMap, err := config.KeyableStringMap(conf.RuleProvider)
+	if err != nil {
+		return nil, fmt.Errorf("rule_provider: %w", err)
+	}
+	ruleProviderDir := filepath.Join(filepath.Dir(cfgFile), "rules")
+	daeDNSRouter, err := daedns.NewWithOption(log, &conf.Global, &conf.Dns, &daedns.NewOption{
+		LocationFinder:               locationFinder,
+		RuleProviders:                ruleProviderMap,
+		RuleProviderDir:              ruleProviderDir,
+		RuleProviderDownloadDisabled: true,
+		SkipUnavailableRuleProviders: true,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1329,10 +1340,12 @@ func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, d
 			dnsCache,
 			tagToNodeList,
 			conf.Group,
+			conf.RuleProvider,
 			&conf.Routing,
 			&conf.Global,
 			&conf.Dns,
 			externGeoDataDirs,
+			ruleProviderDir,
 		)
 	} else {
 		c, err = control.NewControlPlaneWithContext(
@@ -1342,10 +1355,12 @@ func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, d
 			dnsCache,
 			tagToNodeList,
 			conf.Group,
+			conf.RuleProvider,
 			&conf.Routing,
 			&conf.Global,
 			&conf.Dns,
 			externGeoDataDirs,
+			ruleProviderDir,
 		)
 	}
 	if err != nil {
