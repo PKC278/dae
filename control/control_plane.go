@@ -1695,7 +1695,7 @@ func ruleProviderHTTPClientFromRouting(
 	if mark == 0 {
 		mark = global.SoMarkFromDae
 	}
-	return newHTTPClientForRuleProviderDialer(selected, 30*time.Second, mark, global.Mptcp), group.Name, nil
+	return newHTTPClientForRuleProviderDialer(selected, routing.RuleProviderHTTPTimeout, mark, global.Mptcp), group.Name, nil
 }
 
 func ruleProviderDownloadTarget(rawURL string) (host string, port uint16, destAddr netip.Addr, domain string, ipVersion consts.IpVersionType, err error) {

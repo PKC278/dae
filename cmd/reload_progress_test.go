@@ -87,6 +87,51 @@ func TestWriteReloadSendAndSignalWritesReloadSendOnSuccess(t *testing.T) {
 	}
 }
 
+func TestWriteReloadRequestAndSignalWritesForceRuleProviderRequest(t *testing.T) {
+	dir := t.TempDir()
+	progressPath := filepath.Join(dir, "dae.progress")
+	forcePath := filepath.Join(dir, "dae.force-rule-provider")
+
+	if err := writeReloadRequestAndSignal(progressPath, forcePath, true, 5678, func(pid int, sig syscall.Signal) error {
+		if pid != 5678 {
+			t.Fatalf("pid = %d, want 5678", pid)
+		}
+		if sig != syscall.SIGUSR1 {
+			t.Fatalf("sig = %v, want SIGUSR1", sig)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("writeReloadRequestAndSignal() error = %v", err)
+	}
+
+	if _, err := os.Stat(forcePath); err != nil {
+		t.Fatalf("force rule provider request was not created: %v", err)
+	}
+}
+
+func TestWriteReloadRequestAndSignalRemovesForceRuleProviderRequestOnSignalFailure(t *testing.T) {
+	dir := t.TempDir()
+	progressPath := filepath.Join(dir, "dae.progress")
+	forcePath := filepath.Join(dir, "dae.force-rule-provider")
+	killErr := stderrors.New("boom")
+
+	err := writeReloadRequestAndSignal(progressPath, forcePath, true, 4321, func(pid int, sig syscall.Signal) error {
+		if pid != 4321 {
+			t.Fatalf("pid = %d, want 4321", pid)
+		}
+		if sig != syscall.SIGUSR1 {
+			t.Fatalf("sig = %v, want SIGUSR1", sig)
+		}
+		return killErr
+	})
+	if !stderrors.Is(err, killErr) {
+		t.Fatalf("writeReloadRequestAndSignal() error = %v, want %v", err, killErr)
+	}
+	if _, statErr := os.Stat(forcePath); !os.IsNotExist(statErr) {
+		t.Fatalf("Stat() error = %v, want not-exist", statErr)
+	}
+}
+
 func TestWaitReloadCompletionReturnsDoneContent(t *testing.T) {
 	progressPath := filepath.Join(t.TempDir(), "dae.progress")
 	if err := writeSignalProgressFile(progressPath, consts.ReloadProcessing, ""); err != nil {
