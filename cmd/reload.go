@@ -116,6 +116,29 @@ func writeReloadSendAndSignal(path string, pid int, kill func(int, syscall.Signa
 	return nil
 }
 
+func createReloadRequestFile(path string) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}
+
+func writeReloadRequestAndSignal(progressPath, forceRuleProviderPath string, forceRuleProvider bool, pid int, kill func(int, syscall.Signal) error) error {
+	if forceRuleProvider {
+		if err := createReloadRequestFile(forceRuleProviderPath); err != nil {
+			return fmt.Errorf("create force rule provider request: %w", err)
+		}
+	}
+	if err := writeReloadSendAndSignal(progressPath, pid, kill); err != nil {
+		if forceRuleProvider {
+			_ = os.Remove(forceRuleProviderPath)
+		}
+		return err
+	}
+	return nil
+}
+
 func waitReloadCompletion(path string, initialDelay, pollInterval, timeout time.Duration) (code byte, content string, err error) {
 	if initialDelay > 0 {
 		time.Sleep(initialDelay)
@@ -142,8 +165,9 @@ func waitReloadCompletion(path string, initialDelay, pollInterval, timeout time.
 }
 
 var (
-	abort     bool
-	reloadCmd = &cobra.Command{
+	abort             bool
+	forceRuleProvider bool
+	reloadCmd         = &cobra.Command{
 		Use:   "reload [pid]",
 		Short: "To reload config file without interrupt connections.",
 		Run: func(cmd *cobra.Command, args []string) {
@@ -162,9 +186,7 @@ var (
 				os.Exit(1)
 			}
 			if abort {
-				if f, err := os.Create(AbortFile); err == nil {
-					_ = f.Close()
-				}
+				_ = createReloadRequestFile(AbortFile)
 			}
 			// Read the first line of SignalProgressFilePath.
 			code, content, err := readSignalProgressFile(SignalProgressFilePath)
@@ -177,7 +199,7 @@ var (
 				return
 			}
 			// Set the progress as ReloadSend and roll it back if signaling fails.
-			if err = writeReloadSendAndSignal(SignalProgressFilePath, pid, syscall.Kill); err != nil {
+			if err = writeReloadRequestAndSignal(SignalProgressFilePath, ForceRuleProviderFile, forceRuleProvider, pid, syscall.Kill); err != nil {
 				fmt.Printf("failed to request reload: %v\n", err)
 				os.Exit(1)
 			}
@@ -203,4 +225,5 @@ var (
 func init() {
 	rootCmd.AddCommand(reloadCmd)
 	reloadCmd.PersistentFlags().BoolVarP(&abort, "abort", "a", false, "Abort established connections.")
+	reloadCmd.PersistentFlags().BoolVar(&forceRuleProvider, "force-rule-provider", false, "Force refresh all remote rule_provider rule sets.")
 }

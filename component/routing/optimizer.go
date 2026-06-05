@@ -187,6 +187,11 @@ var ErrRuleProviderUnavailable = errors.New("rule provider unavailable")
 
 type RuleProviderHTTPClientResolver func(name string, rawURL string) (*http.Client, error)
 
+const (
+	RuleProviderHTTPTimeout            = 10 * time.Second
+	maxConcurrentRuleProviderDownloads = 4
+)
+
 func cloneParams(params []*config_parser.Param) []*config_parser.Param {
 	if len(params) == 0 {
 		return nil
@@ -270,11 +275,32 @@ func DownloadRuleProvidersWithOptions(ruleProviders map[string]string, opt Downl
 		RuleProviderHTTPClientResolver: opt.HTTPClientResolver,
 		RuleProviderDownloadForced:     opt.Force,
 	}
-	for _, name := range names {
-		if _, err := optimizer.loadRuleProviderContent(name); err != nil {
-			if opt.IgnoreErrors {
-				continue
+	workerCount := min(len(names), maxConcurrentRuleProviderDownloads)
+	jobs := make(chan int)
+	errs := make([]error, len(names))
+	var wg sync.WaitGroup
+	for range workerCount {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				if _, err := optimizer.loadRuleProviderContent(names[idx]); err != nil {
+					errs[idx] = err
+				}
 			}
+		}()
+	}
+	for idx := range names {
+		jobs <- idx
+	}
+	close(jobs)
+	wg.Wait()
+
+	if opt.IgnoreErrors {
+		return nil
+	}
+	for _, err := range errs {
+		if err != nil {
 			return err
 		}
 	}
@@ -306,7 +332,7 @@ func (o *DatReaderOptimizer) downloadAndStoreRuleProviderContent(name string) ([
 		return nil, fmt.Errorf("rule provider %q is not defined", name)
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: RuleProviderHTTPTimeout}
 	if o.RuleProviderHTTPClientResolver != nil {
 		var err error
 		client, err = o.RuleProviderHTTPClientResolver(name, url)
@@ -314,7 +340,7 @@ func (o *DatReaderOptimizer) downloadAndStoreRuleProviderContent(name string) ([
 			return nil, fmt.Errorf("resolve HTTP client for rule provider %q: %w", name, err)
 		}
 		if client == nil {
-			client = &http.Client{Timeout: 30 * time.Second}
+			client = &http.Client{Timeout: RuleProviderHTTPTimeout}
 		}
 	}
 	resp, err := client.Get(url)

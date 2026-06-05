@@ -6,10 +6,12 @@
 package routing
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -289,6 +291,70 @@ func TestDownloadRuleProvidersOnlyDownloadsMissingProvider(t *testing.T) {
 	}
 	if string(missingContent) != "+.remote-missing.example\n" {
 		t.Fatalf("missing provider content = %q", missingContent)
+	}
+}
+
+func TestDownloadRuleProvidersLimitsConcurrentDownloads(t *testing.T) {
+	ruleProviderDir := t.TempDir()
+	var active atomic.Int32
+	var maxActive atomic.Int32
+	entered := make(chan struct{}, 8)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() {
+		releaseOnce.Do(func() {
+			close(release)
+		})
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		current := active.Add(1)
+		defer active.Add(-1)
+		for {
+			old := maxActive.Load()
+			if current <= old || maxActive.CompareAndSwap(old, current) {
+				break
+			}
+		}
+		entered <- struct{}{}
+		<-release
+		_, _ = w.Write([]byte("+.remote.example\n"))
+	}))
+	defer server.Close()
+
+	ruleProviders := make(map[string]string)
+	for i := range 8 {
+		ruleProviders[fmt.Sprintf("p%d", i)] = server.URL
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- DownloadRuleProvidersWithOptions(ruleProviders, DownloadRuleProviderOptions{
+			Dir:   ruleProviderDir,
+			Force: true,
+		})
+	}()
+
+	for range maxConcurrentRuleProviderDownloads {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for initial concurrent rule provider downloads")
+		}
+	}
+	select {
+	case <-entered:
+		t.Fatalf("observed more than %d concurrent downloads", maxConcurrentRuleProviderDownloads)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	releaseOnce.Do(func() {
+		close(release)
+	})
+	if err := <-errCh; err != nil {
+		t.Fatalf("DownloadRuleProvidersWithOptions failed: %v", err)
+	}
+	if got := maxActive.Load(); got > maxConcurrentRuleProviderDownloads {
+		t.Fatalf("max concurrent downloads = %d, want <= %d", got, maxConcurrentRuleProviderDownloads)
 	}
 }
 
