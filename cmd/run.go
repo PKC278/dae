@@ -315,22 +315,27 @@ func Run(log *logrus.Logger, conf *config.Config, externGeoDataDirs []string) (e
 }
 
 type ruleProviderUpdateLoop struct {
-	updates chan time.Duration
+	updates chan ruleProviderUpdateSchedule
 	stop    context.CancelFunc
 }
 
-func (l *ruleProviderUpdateLoop) Update(interval time.Duration) {
+type ruleProviderUpdateSchedule struct {
+	delay         time.Duration
+	forceDownload bool
+}
+
+func (l *ruleProviderUpdateLoop) Update(schedule ruleProviderUpdateSchedule) {
 	if l == nil {
 		return
 	}
 	select {
-	case l.updates <- interval:
+	case l.updates <- schedule:
 	default:
 		select {
 		case <-l.updates:
 		default:
 		}
-		l.updates <- interval
+		l.updates <- schedule
 	}
 }
 
@@ -347,45 +352,76 @@ func ruleProviderUpdateInterval(conf *config.Config) time.Duration {
 	return conf.Global.RuleProviderUpdateInterval
 }
 
-func ruleProviderUpdateDelay(conf *config.Config, allowImmediate bool) time.Duration {
+func ruleProviderUpdateScheduleFromConfig(conf *config.Config, allowImmediate bool) ruleProviderUpdateSchedule {
+	return ruleProviderUpdateScheduleForDir(conf, filepath.Join(filepath.Dir(cfgFile), "rules"), time.Now(), allowImmediate)
+}
+
+func ruleProviderUpdateScheduleForDir(conf *config.Config, ruleProviderDir string, now time.Time, allowImmediate bool) ruleProviderUpdateSchedule {
 	interval := ruleProviderUpdateInterval(conf)
 	if interval <= 0 {
-		return 0
+		return ruleProviderUpdateSchedule{}
 	}
 	ruleProviders, err := config.KeyableStringMap(conf.RuleProvider)
 	if err != nil || len(ruleProviders) == 0 {
-		return 0
+		return ruleProviderUpdateSchedule{}
 	}
-	ruleProviderDir := filepath.Join(filepath.Dir(cfgFile), "rules")
-	now := time.Now()
 	delay := interval
+	missing := false
 	for name := range ruleProviders {
 		info, statErr := os.Stat(filepath.Join(ruleProviderDir, name+".list"))
 		if statErr != nil {
+			missing = true
 			continue
 		}
 		remaining := info.ModTime().Add(interval).Sub(now)
 		if remaining <= 0 {
 			if allowImmediate {
-				return time.Nanosecond
+				return ruleProviderUpdateSchedule{delay: time.Nanosecond, forceDownload: true}
 			}
-			return interval
+			return ruleProviderUpdateSchedule{delay: interval, forceDownload: true}
 		}
 		if remaining < delay {
 			delay = remaining
 		}
 	}
-	return delay
+	if missing {
+		if allowImmediate {
+			return ruleProviderUpdateSchedule{delay: time.Nanosecond}
+		}
+		return ruleProviderUpdateSchedule{delay: interval}
+	}
+	return ruleProviderUpdateSchedule{delay: delay, forceDownload: true}
 }
 
-func startRuleProviderUpdateLoop(log *logrus.Logger, reloadManager *reloadManager, initialDelay time.Duration) *ruleProviderUpdateLoop {
+func ruleProviderForceRefreshDue(conf *config.Config, ruleProviderDir string, now time.Time) bool {
+	interval := ruleProviderUpdateInterval(conf)
+	if interval <= 0 {
+		return false
+	}
+	ruleProviders, err := config.KeyableStringMap(conf.RuleProvider)
+	if err != nil || len(ruleProviders) == 0 {
+		return false
+	}
+	for name := range ruleProviders {
+		info, statErr := os.Stat(filepath.Join(ruleProviderDir, name+".list"))
+		if statErr != nil {
+			continue
+		}
+		if !info.ModTime().Add(interval).After(now) {
+			return true
+		}
+	}
+	return false
+}
+
+func startRuleProviderUpdateLoop(log *logrus.Logger, reloadManager *reloadManager, initialSchedule ruleProviderUpdateSchedule) *ruleProviderUpdateLoop {
 	ctx, cancel := context.WithCancel(context.Background())
 	loop := &ruleProviderUpdateLoop{
-		updates: make(chan time.Duration, 1),
+		updates: make(chan ruleProviderUpdateSchedule, 1),
 		stop:    cancel,
 	}
 	go func() {
-		delay := initialDelay
+		schedule := initialSchedule
 		var timer *time.Timer
 		var timerCh <-chan time.Time
 		resetTimer := func() {
@@ -399,11 +435,11 @@ func startRuleProviderUpdateLoop(log *logrus.Logger, reloadManager *reloadManage
 				timer = nil
 				timerCh = nil
 			}
-			if delay > 0 {
-				timer = time.NewTimer(delay)
+			if schedule.delay > 0 {
+				timer = time.NewTimer(schedule.delay)
 				timerCh = timer.C
 				if log != nil {
-					log.Infof("[RuleProvider] Next automatic update in %v", delay)
+					log.Infof("[RuleProvider] Next automatic update in %v", schedule.delay)
 				}
 			}
 		}
@@ -419,10 +455,10 @@ func startRuleProviderUpdateLoop(log *logrus.Logger, reloadManager *reloadManage
 			case <-ctx.Done():
 				return
 			case next := <-loop.updates:
-				if next == delay {
+				if next == schedule {
 					continue
 				}
-				delay = next
+				schedule = next
 				resetTimer()
 			case <-timerCh:
 				if log != nil {
@@ -430,13 +466,13 @@ func startRuleProviderUpdateLoop(log *logrus.Logger, reloadManager *reloadManage
 				}
 				if reloadManager != nil {
 					reloadManager.queueReloadRequest(log, reloadRequest{
-						forceRuleProviderDownload: true,
+						forceRuleProviderDownload: schedule.forceDownload,
 						ignoreRuleProviderErrors:  true,
 						requestedAt:               time.Now(),
 						requestedAtMono:           monotonicNowNano(),
 					})
 				}
-				delay = 0
+				schedule = ruleProviderUpdateSchedule{}
 				resetTimer()
 			}
 		}
@@ -514,7 +550,7 @@ func (r *Runner) Run() (err error) {
 
 	reloadReqs := make(chan reloadRequest, 1)
 	reloadManager := newReloadManager(reloadReqs, runStateChanges, sigs)
-	autoRuleProviderUpdater := startRuleProviderUpdateLoop(log, reloadManager, ruleProviderUpdateDelay(conf, true))
+	autoRuleProviderUpdater := startRuleProviderUpdateLoop(log, reloadManager, ruleProviderUpdateScheduleFromConfig(conf, true))
 	defer autoRuleProviderUpdater.Stop()
 	fastExit := false
 
@@ -871,7 +907,7 @@ loop:
 					} else {
 						_ = setRunSignalProgress(consts.ReloadError, reloadErr.Error())
 					}
-					autoRuleProviderUpdater.Update(ruleProviderUpdateDelay(conf, false))
+					autoRuleProviderUpdater.Update(ruleProviderUpdateScheduleFromConfig(conf, false))
 					log.Warnln("[Reload] Finished")
 					reloadManager.finishReloadSuccess()
 					continue
@@ -959,7 +995,7 @@ loop:
 				} else {
 					_ = setRunSignalProgress(consts.ReloadError, reloadErr.Error())
 				}
-				autoRuleProviderUpdater.Update(ruleProviderUpdateDelay(conf, false))
+				autoRuleProviderUpdater.Update(ruleProviderUpdateScheduleFromConfig(conf, false))
 				log.Warnln("[Reload] Finished")
 				reloadManager.finishReloadSuccess()
 				if dnsHandoffActive && log.IsLevelEnabled(logrus.DebugLevel) {
@@ -1302,6 +1338,10 @@ func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, d
 		return nil, fmt.Errorf("rule_provider: %w", err)
 	}
 	ruleProviderDir := filepath.Join(filepath.Dir(cfgFile), "rules")
+	if !forceRuleProviderDownload && ruleProviderForceRefreshDue(conf, ruleProviderDir, time.Now()) {
+		forceRuleProviderDownload = true
+		log.Infoln("[RuleProvider] Cached rule provider is due; force refreshing all rule providers")
+	}
 	daeDNSRouter, err := daedns.NewWithOption(log, &conf.Global, &conf.Dns, &daedns.NewOption{
 		LocationFinder:               locationFinder,
 		RuleProviders:                ruleProviderMap,

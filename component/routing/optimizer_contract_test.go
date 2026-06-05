@@ -241,6 +241,57 @@ func TestDownloadRuleProvidersUsesExistingTextFile(t *testing.T) {
 	}
 }
 
+func TestDownloadRuleProvidersOnlyDownloadsMissingProvider(t *testing.T) {
+	ruleProviderDir := t.TempDir()
+	existingPath := filepath.Join(ruleProviderDir, "existing.list")
+	if err := os.WriteFile(existingPath, []byte("+.local.example\n"), 0644); err != nil {
+		t.Fatalf("write existing provider: %v", err)
+	}
+
+	var existingRequests atomic.Int32
+	var missingRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/existing":
+			existingRequests.Add(1)
+			_, _ = w.Write([]byte("+.remote-existing.example\n"))
+		case "/missing":
+			missingRequests.Add(1)
+			_, _ = w.Write([]byte("+.remote-missing.example\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	if err := DownloadRuleProviders(map[string]string{
+		"existing": server.URL + "/existing",
+		"missing":  server.URL + "/missing",
+	}, ruleProviderDir); err != nil {
+		t.Fatalf("DownloadRuleProviders failed: %v", err)
+	}
+	if got := existingRequests.Load(); got != 0 {
+		t.Fatalf("existing provider requests = %d, want 0", got)
+	}
+	if got := missingRequests.Load(); got != 1 {
+		t.Fatalf("missing provider requests = %d, want 1", got)
+	}
+	content, err := os.ReadFile(existingPath)
+	if err != nil {
+		t.Fatalf("read existing provider file: %v", err)
+	}
+	if string(content) != "+.local.example\n" {
+		t.Fatalf("existing provider file was overwritten: %q", content)
+	}
+	missingContent, err := os.ReadFile(filepath.Join(ruleProviderDir, "missing.list"))
+	if err != nil {
+		t.Fatalf("read missing provider file: %v", err)
+	}
+	if string(missingContent) != "+.remote-missing.example\n" {
+		t.Fatalf("missing provider content = %q", missingContent)
+	}
+}
+
 func TestDownloadRuleProvidersOverwritesNonTextFile(t *testing.T) {
 	ruleProviderDir := t.TempDir()
 	path := filepath.Join(ruleProviderDir, "cn.list")
@@ -275,36 +326,55 @@ func TestDownloadRuleProvidersForceRefreshesExistingTextFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(ruleProviderDir, "cn.list"), []byte("old.example\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(ruleProviderDir, "fresh.list"), []byte("fresh-old.example\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	oldTime := time.Now().Add(-time.Hour)
 	if err := os.Chtimes(filepath.Join(ruleProviderDir, "cn.list"), oldTime, oldTime); err != nil {
 		t.Fatal(err)
 	}
 	before := time.Now()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("new.example\n"))
+		switch r.URL.Path {
+		case "/cn":
+			_, _ = w.Write([]byte("new.example\n"))
+		case "/fresh":
+			_, _ = w.Write([]byte("fresh-new.example\n"))
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer server.Close()
 
-	if err := DownloadRuleProvidersWithOptions(map[string]string{"cn": server.URL}, DownloadRuleProviderOptions{
+	if err := DownloadRuleProvidersWithOptions(map[string]string{
+		"cn":    server.URL + "/cn",
+		"fresh": server.URL + "/fresh",
+	}, DownloadRuleProviderOptions{
 		Dir:   ruleProviderDir,
 		Force: true,
 	}); err != nil {
 		t.Fatalf("DownloadRuleProvidersWithOptions failed: %v", err)
 	}
 
-	got, err := os.ReadFile(filepath.Join(ruleProviderDir, "cn.list"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "new.example\n" {
-		t.Fatalf("rule provider content = %q, want forced refresh", got)
-	}
-	info, err := os.Stat(filepath.Join(ruleProviderDir, "cn.list"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.ModTime().Before(before) {
-		t.Fatalf("rule provider mtime = %v, want >= %v", info.ModTime(), before)
+	for name, want := range map[string]string{
+		"cn":    "new.example\n",
+		"fresh": "fresh-new.example\n",
+	} {
+		path := filepath.Join(ruleProviderDir, name+".list")
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != want {
+			t.Fatalf("%s rule provider content = %q, want forced refresh", name, got)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.ModTime().Before(before) {
+			t.Fatalf("%s rule provider mtime = %v, want >= %v", name, info.ModTime(), before)
+		}
 	}
 }
 
