@@ -1519,6 +1519,9 @@ func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, d
 		if ignoreRuleProviderErrors {
 			opts = append(opts, control.WithIgnoreRuleProviderErrors(true))
 		}
+		if daeDNSRouter != nil {
+			opts = append(opts, control.WithRuleProviderDNSRouter(daeDNSRouter))
+		}
 		c, err = control.NewPreparedControlPlaneWithContext(
 			ctx,
 			log,
@@ -1541,6 +1544,9 @@ func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, d
 		}
 		if ignoreRuleProviderErrors {
 			opts = append(opts, control.WithIgnoreRuleProviderErrors(true))
+		}
+		if daeDNSRouter != nil {
+			opts = append(opts, control.WithRuleProviderDNSRouter(daeDNSRouter))
 		}
 		c, err = control.NewControlPlaneWithContext(
 			ctx,

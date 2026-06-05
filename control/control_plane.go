@@ -122,6 +122,7 @@ type controlPlaneBuildOptions struct {
 	delayDNSListenerStart     bool
 	forceRuleProviderDownload bool
 	ignoreRuleProviderErrors  bool
+	ruleProviderDNSRouter     *daedns.Router
 }
 
 type ControlPlaneBuildOption interface {
@@ -143,6 +144,12 @@ func WithForceRuleProviderDownload(force bool) ControlPlaneBuildOption {
 func WithIgnoreRuleProviderErrors(ignore bool) ControlPlaneBuildOption {
 	return controlPlaneBuildOptionFunc(func(opts *controlPlaneBuildOptions) {
 		opts.ignoreRuleProviderErrors = ignore
+	})
+}
+
+func WithRuleProviderDNSRouter(router *daedns.Router) ControlPlaneBuildOption {
+	return controlPlaneBuildOptionFunc(func(opts *controlPlaneBuildOptions) {
+		opts.ruleProviderDNSRouter = router
 	})
 }
 
@@ -695,7 +702,7 @@ func newControlPlaneWithContextOptions(
 		outboundName2Id[o.Name] = uint8(i)
 		outboundId2Name[uint8(i)] = o.Name
 	}
-	if err = downloadRuleProvidersThroughRouting(log, locationFinder, routingA, ruleProviderMap, ruleProviderDir, outboundName2Id, outbounds, global, buildOpts.forceRuleProviderDownload, buildOpts.ignoreRuleProviderErrors); err != nil {
+	if err = downloadRuleProvidersThroughRouting(log, locationFinder, routingA, ruleProviderMap, ruleProviderDir, outboundName2Id, outbounds, global, buildOpts.ruleProviderDNSRouter, buildOpts.forceRuleProviderDownload, buildOpts.ignoreRuleProviderErrors); err != nil {
 		return nil, fmt.Errorf("download rule providers: %w", err)
 	}
 	// Apply rules optimizers.
@@ -1560,6 +1567,7 @@ func downloadRuleProvidersThroughRouting(
 	outboundName2Id map[string]uint8,
 	outbounds []*outbound.DialerGroup,
 	global *config.Global,
+	dnsRouter *daedns.Router,
 	force bool,
 	ignoreErrors bool,
 ) error {
@@ -1576,7 +1584,7 @@ func downloadRuleProvidersThroughRouting(
 		Force:        force,
 		IgnoreErrors: ignoreErrors,
 		HTTPClientResolver: func(name string, rawURL string) (*http.Client, error) {
-			client, outboundName, err := ruleProviderHTTPClientFromRouting(rawURL, matcher, outbounds, global)
+			client, outboundName, err := ruleProviderHTTPClientFromRouting(log, name, rawURL, matcher, outbounds, global, dnsRouter)
 			if err != nil {
 				return nil, err
 			}
@@ -1620,14 +1628,28 @@ func buildRuleProviderDownloadMatcher(
 }
 
 func ruleProviderHTTPClientFromRouting(
+	log *logrus.Logger,
+	name string,
 	rawURL string,
 	matcher *RoutingMatcher,
 	outbounds []*outbound.DialerGroup,
 	global *config.Global,
+	dnsRouter *daedns.Router,
 ) (*http.Client, string, error) {
 	host, port, destAddr, domain, ipVersion, err := ruleProviderDownloadTarget(rawURL)
 	if err != nil {
 		return nil, "", err
+	}
+	wrapDialerWithDNSRouter := false
+	if domain != "" && dnsRouter != nil {
+		resolvedAddr, resolveErr := resolveRuleProviderDownloadAddr(dnsRouter, host)
+		if resolveErr == nil {
+			destAddr = resolvedAddr
+			ipVersion = consts.IpVersionFromAddr(destAddr).ToIpVersionType()
+			wrapDialerWithDNSRouter = true
+		} else if log != nil {
+			log.Warnf("Resolve rule provider %q host %q through bootstrap DNS failed; fall back to placeholder routing: %v", name, host, resolveErr)
+		}
 	}
 
 	srcAddr := netip.MustParseAddr("127.0.0.1")
@@ -1670,7 +1692,27 @@ func ruleProviderHTTPClientFromRouting(
 	if mark == 0 {
 		mark = global.SoMarkFromDae
 	}
-	return newHTTPClientForRuleProviderDialer(selected, routing.RuleProviderHTTPTimeout, mark, global.Mptcp), group.Name, nil
+	selectedDialer := netproxy.Dialer(selected)
+	if wrapDialerWithDNSRouter {
+		selectedDialer = dnsRouter.WrapRuleProviderDialer(selectedDialer, host)
+	}
+	return newHTTPClientForRuleProviderDialer(selectedDialer, routing.RuleProviderHTTPTimeout, mark, global.Mptcp), group.Name, nil
+}
+
+func resolveRuleProviderDownloadAddr(dnsRouter *daedns.Router, host string) (netip.Addr, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), routing.RuleProviderHTTPTimeout)
+	defer cancel()
+	ips, err := dnsRouter.LookupRuleProviderIPAddr(ctx, string(consts.L4ProtoStr_TCP), host)
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	for _, ip := range ips {
+		addr, ok := netip.AddrFromSlice(ip.IP)
+		if ok && addr.IsValid() {
+			return addr.Unmap(), nil
+		}
+	}
+	return netip.Addr{}, fmt.Errorf("no usable address returned")
 }
 
 func ruleProviderDownloadTarget(rawURL string) (host string, port uint16, destAddr netip.Addr, domain string, ipVersion consts.IpVersionType, err error) {
