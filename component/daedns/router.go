@@ -261,6 +261,31 @@ func (r *Router) WrapSubscriptionDialer(base netproxy.Dialer, rawSubscription st
 	}, nil
 }
 
+func (r *Router) WrapRuleProviderDialer(base netproxy.Dialer, host string) netproxy.Dialer {
+	if r == nil {
+		return base
+	}
+	if r.requestMatcher == nil && host == "" {
+		return base
+	}
+	return &resolvingDialer{
+		Dialer:      base,
+		router:      r,
+		controlHost: host,
+	}
+}
+
+func (r *Router) LookupRuleProviderIPAddr(ctx context.Context, network, host string) ([]net.IPAddr, error) {
+	if r == nil {
+		return net.DefaultResolver.LookupIPAddr(ctx, host)
+	}
+	return (&resolvingDialer{
+		Dialer:      direct.SymmetricDirect,
+		router:      r,
+		controlHost: host,
+	}).lookupIPAddr(ctx, network, host)
+}
+
 func (r *Router) WrapNodeDialer(base netproxy.Dialer, meta NodeMeta) (netproxy.Dialer, error) {
 	if r == nil {
 		return base, nil
