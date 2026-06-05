@@ -535,6 +535,91 @@ func TestRouterWrapSubscriptionDialerUsesBootstrapForSubscriptionHostWithoutExpl
 	}
 }
 
+func TestRouterWrapRuleProviderDialerUsesBootstrapForProviderHost(t *testing.T) {
+	skipIfNoSocketMark(t)
+	requestAddr, stopRequest := startTestDNSUDPServer(t, netip.MustParseAddr("203.0.113.14"))
+	defer stopRequest()
+	bootstrapAddr, stopBootstrap := startTestDNSUDPServer(t, netip.MustParseAddr("198.51.100.14"))
+	defer stopBootstrap()
+
+	router, err := New(logrus.New(), &config.Global{
+		BootstrapResolver: bootstrapAddr,
+	}, &config.Dns{
+		Upstream: []config.KeyableString{
+			config.KeyableString(fmt.Sprintf("fallbackdns:udp://%s", requestAddr)),
+		},
+		Routing: config.DnsRouting{
+			Request: config.DnsRequestRouting{
+				Rules: []*config_parser.RoutingRule{
+					testInternalRule("fallbackdns", testInternalFunction("qname", testInternalParam("suffix", "example.com"))),
+				},
+				Fallback: "fallbackdns",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	base := &stubDialer{}
+	wrapped := router.WrapRuleProviderDialer(base, "rules.example.com")
+	if wrapped == base {
+		t.Fatal("expected WrapRuleProviderDialer to wrap base dialer for provider host")
+	}
+
+	resolver, ok := wrapped.(interface {
+		LookupIPAddr(context.Context, string, string) ([]net.IPAddr, error)
+	})
+	if !ok {
+		t.Fatal("wrapped dialer does not expose LookupIPAddr")
+	}
+	ips, err := resolver.LookupIPAddr(context.Background(), "tcp", "rules.example.com")
+	if err != nil {
+		t.Fatalf("LookupIPAddr() error = %v", err)
+	}
+	if base.lookupCalls != 0 {
+		t.Fatalf("base lookup calls = %d, want 0", base.lookupCalls)
+	}
+	if len(ips) != 1 || !ips[0].IP.Equal(net.IPv4(198, 51, 100, 14)) {
+		t.Fatalf("LookupIPAddr() = %v, want 198.51.100.14", ips)
+	}
+}
+
+func TestRouterLookupRuleProviderIPAddrUsesBootstrapForProviderHost(t *testing.T) {
+	skipIfNoSocketMark(t)
+	requestAddr, stopRequest := startTestDNSUDPServer(t, netip.MustParseAddr("203.0.113.15"))
+	defer stopRequest()
+	bootstrapAddr, stopBootstrap := startTestDNSUDPServer(t, netip.MustParseAddr("198.51.100.15"))
+	defer stopBootstrap()
+
+	router, err := New(logrus.New(), &config.Global{
+		BootstrapResolver: bootstrapAddr,
+	}, &config.Dns{
+		Upstream: []config.KeyableString{
+			config.KeyableString(fmt.Sprintf("fallbackdns:udp://%s", requestAddr)),
+		},
+		Routing: config.DnsRouting{
+			Request: config.DnsRequestRouting{
+				Rules: []*config_parser.RoutingRule{
+					testInternalRule("fallbackdns", testInternalFunction("qname", testInternalParam("suffix", "example.com"))),
+				},
+				Fallback: "fallbackdns",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	ips, err := router.LookupRuleProviderIPAddr(context.Background(), "tcp", "rules.example.com")
+	if err != nil {
+		t.Fatalf("LookupRuleProviderIPAddr() error = %v", err)
+	}
+	if len(ips) != 1 || !ips[0].IP.Equal(net.IPv4(198, 51, 100, 15)) {
+		t.Fatalf("LookupRuleProviderIPAddr() = %v, want 198.51.100.15", ips)
+	}
+}
+
 func TestRouterLookupIPAddrDedupScopesByUpstream(t *testing.T) {
 	skipIfNoSocketMark(t)
 	addr1, got1, release1, stop1 := startBlockingDNSUDPServer(t, netip.MustParseAddr("203.0.113.11"))
