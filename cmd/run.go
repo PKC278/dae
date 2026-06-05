@@ -489,6 +489,7 @@ func (r *Runner) Run() (err error) {
 
 	// Remove AbortFile at beginning.
 	_ = os.Remove(AbortFile)
+	_ = os.Remove(ForceRuleProviderFile)
 
 	// New ControlPlane.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -844,10 +845,12 @@ loop:
 					requestedAtMono: monotonicNowNano(),
 				})
 			case syscall.SIGUSR1:
+				forceRuleProviderDownload := os.Remove(ForceRuleProviderFile) == nil
 				reloadManager.queueReloadRequest(log, reloadRequest{
-					isSuspend:       false,
-					requestedAt:     time.Now(),
-					requestedAtMono: monotonicNowNano(),
+					isSuspend:                 false,
+					forceRuleProviderDownload: forceRuleProviderDownload,
+					requestedAt:               time.Now(),
+					requestedAtMono:           monotonicNowNano(),
 				})
 			case syscall.SIGHUP:
 				// Ignore.
