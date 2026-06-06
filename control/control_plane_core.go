@@ -721,7 +721,7 @@ func (c *controlPlaneCore) _bindWan(ifname string) error {
 			Parent:    netlink.HANDLE_MIN_INGRESS,
 			Handle:    netlink.MakeHandle(0x2023, 0b010+uint16(c.flip)),
 			Protocol:  unix.ETH_P_ALL,
-			Priority:  1,
+			Priority:  2,
 		},
 		Name:         consts.AppName + "_wan_ingress",
 		DirectAction: true,
