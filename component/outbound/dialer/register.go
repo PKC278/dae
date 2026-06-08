@@ -15,6 +15,7 @@ import (
 	"github.com/daeuniverse/dae/component/daedns"
 	D "github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/dialer/stickyip"
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol/direct"
 	"github.com/sirupsen/logrus"
 )
@@ -33,7 +34,11 @@ func NewFromLinkWithProxyCacheContext(ctx context.Context, gOption *GlobalOption
 	}
 
 	normalizedLink := normalizeShadowTLSPluginOptions(link)
-	baseDialer := newDefaultNetworkDialer(direct.SymmetricDirect, gOption.SoMarkFromDae, gOption.Mptcp)
+	tfo, err := parseNodeTFO(normalizedLink)
+	if err != nil {
+		return nil, err
+	}
+	baseDialer := newNodeBaseDialer(gOption, tfo)
 	scopedBaseDialer := scopeTransportCacheDialer(baseDialer, gOption.TransportCacheNamespace)
 
 	// First, create the protocol dialer with direct dialer to get the property
@@ -115,6 +120,14 @@ func NewFromLinkWithProxyCacheContext(ctx context.Context, gOption *GlobalOption
 	}
 
 	return daeDialer, nil
+}
+
+func newNodeBaseDialer(gOption *GlobalOption, tfo bool) netproxy.Dialer {
+	base := direct.SymmetricDirect
+	if tfo {
+		base = newTCPFastOpenDialer(gOption.FallbackResolver)
+	}
+	return newDefaultNetworkDialer(base, gOption.SoMarkFromDae, gOption.Mptcp)
 }
 
 // needsStickyIpCaching checks if the given address needs sticky IP caching.

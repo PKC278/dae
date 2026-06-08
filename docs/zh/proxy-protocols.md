@@ -29,6 +29,8 @@
 
   [DuckSoft URI Schema](https://github.com/XTLS/Xray-core/discussions/716)
 
+  TCP 节点链接可以追加 `tfo=true` 或 `tfo=1`，为该节点连接代理服务器时启用 TCP Fast Open。
+
 - [x] Shadowsocks
   - [x] AEAD Ciphers
   - [x] Stream Ciphers

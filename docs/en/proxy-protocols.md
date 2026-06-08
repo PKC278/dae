@@ -29,6 +29,8 @@
 
   [DuckSoft URI Schema](https://github.com/XTLS/Xray-core/discussions/716)
 
+  Append `tfo=true` or `tfo=1` to TCP node links to enable TCP Fast Open when connecting to the proxy server for that node.
+
 - [x] Shadowsocks
   - [x] AEAD Ciphers
   - [x] Stream Ciphers
