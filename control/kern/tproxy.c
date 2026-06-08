@@ -2518,8 +2518,13 @@ static __noinline bool
 wan_outbound_is_alive(struct __sk_buff *skb, __u8 outbound, __u8 l4proto,
 		      __be16 dport)
 {
-	/* DNS must always reach control plane; userspace handles fallback. */
-	if (dport == bpf_htons(53))
+	/* DNS queries must always reach the control plane. User-space DNS
+	 * routing is responsible for fallback, rejection and SERVFAIL
+	 * synthesis; dropping port 53 here turns upstream health noise into
+	 * client-visible timeouts. This covers both UDP DNS and TCP DNS fast path.
+	 */
+	if ((l4proto == IPPROTO_UDP || l4proto == IPPROTO_TCP) &&
+	    dport == bpf_htons(53))
 		return true;
 
 	// ARRAY map key: outbound_id * 6 + domain * 2 + ipversion
