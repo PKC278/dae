@@ -19,6 +19,10 @@ import (
 )
 
 func newTestControlPlaneWithSingleMetadataRule(t *testing.T, functionName, literal string) *ControlPlane {
+	return newTestControlPlaneWithSingleMetadataRuleNot(t, functionName, literal, false)
+}
+
+func newTestControlPlaneWithSingleMetadataRuleNot(t *testing.T, functionName, literal string, not bool) *ControlPlane {
 	t.Helper()
 
 	rules := []*config_parser.RoutingRule{
@@ -26,6 +30,7 @@ func newTestControlPlaneWithSingleMetadataRule(t *testing.T, functionName, liter
 			AndFunctions: []*config_parser.Function{
 				{
 					Name: functionName,
+					Not:  not,
 					Params: []*config_parser.Param{
 						{Val: literal},
 					},
@@ -46,12 +51,12 @@ func newTestControlPlaneWithSingleMetadataRule(t *testing.T, functionName, liter
 		config.FunctionOrString("direct"),
 	)
 	if err != nil {
-		t.Fatalf("NewRoutingMatcherBuilder(%q=%q): %v", functionName, literal, err)
+		t.Fatalf("NewRoutingMatcherBuilder(%q=%q, not=%v): %v", functionName, literal, not, err)
 	}
 
 	matcher, err := builder.BuildUserspace()
 	if err != nil {
-		t.Fatalf("BuildUserspace(%q=%q): %v", functionName, literal, err)
+		t.Fatalf("BuildUserspace(%q=%q, not=%v): %v", functionName, literal, not, err)
 	}
 
 	return &ControlPlane{controlPlaneGenerationState: controlPlaneGenerationState{routingMatcher: matcher}}
@@ -273,6 +278,152 @@ func TestRetrievedRoutingResultStillMatchesMetadataSensitiveRules(t *testing.T) 
 			}
 			if outbound != consts.OutboundUserDefinedMin {
 				t.Fatalf("Route(%s) outbound = %v, want %v", tt.name, outbound, consts.OutboundUserDefinedMin)
+			}
+		})
+	}
+}
+
+func TestControlPlaneRouteIgnoresProcessNameForLanTraffic(t *testing.T) {
+	lanMac, err := common.ParseMac("02:42:ac:11:00:02")
+	if err != nil {
+		t.Fatalf("ParseMac(lanMac): %v", err)
+	}
+	src := common.ConvergeAddrPort(netip.MustParseAddrPort("192.0.2.10:12345"))
+	dst := common.ConvergeAddrPort(netip.MustParseAddrPort("198.51.100.20:443"))
+
+	var pname [16]uint8
+	copy(pname[:], "curl")
+
+	for _, tt := range []struct {
+		name string
+		not  bool
+	}{
+		{name: "positive_pname", not: false},
+		{name: "negative_pname", not: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			plane := newTestControlPlaneWithSingleMetadataRuleNot(t, consts.Function_ProcessName, "curl", tt.not)
+			rr := &bpfRoutingResult{
+				Mac:   lanMac,
+				Pname: pname,
+			}
+
+			outbound, _, _, _, err := plane.Route(src, dst, "", consts.L4ProtoType_TCP, rr)
+			if err != nil {
+				t.Fatalf("Route(lan pname): %v", err)
+			}
+			if outbound != consts.OutboundDirect {
+				t.Fatalf("Route(lan pname) outbound = %v, want %v", outbound, consts.OutboundDirect)
+			}
+		})
+	}
+}
+
+func TestRoutingMatcherMissingProcessNameFallsThroughPnameRules(t *testing.T) {
+	src := common.ConvergeAddrPort(netip.MustParseAddrPort("192.0.2.10:12345"))
+	dst := common.ConvergeAddrPort(netip.MustParseAddrPort("198.51.100.20:443"))
+
+	for _, tt := range []struct {
+		name string
+		not  bool
+	}{
+		{name: "positive_pname", not: false},
+		{name: "negative_pname", not: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			plane := newTestControlPlaneWithSingleMetadataRuleNot(t, consts.Function_ProcessName, "curl", tt.not)
+
+			outbound, _, _, _, err := plane.routingMatcher.MatchWithDrop(
+				src.Addr().As16(),
+				dst.Addr().As16(),
+				src.Port(),
+				dst.Port(),
+				consts.IpVersion_4,
+				consts.L4ProtoType_TCP,
+				"",
+				[16]uint8{},
+				0,
+				[16]uint8{},
+			)
+			if err != nil {
+				t.Fatalf("MatchWithDrop(missing pname): %v", err)
+			}
+			if outbound != consts.OutboundDirect {
+				t.Fatalf("MatchWithDrop(missing pname) outbound = %v, want %v", outbound, consts.OutboundDirect)
+			}
+		})
+	}
+}
+
+func TestRoutingMatcherMissingProcessNameContinuesToLaterRule(t *testing.T) {
+	src := common.ConvergeAddrPort(netip.MustParseAddrPort("192.0.2.10:12345"))
+	dst := common.ConvergeAddrPort(netip.MustParseAddrPort("198.51.100.20:443"))
+
+	for _, tt := range []struct {
+		name string
+		rule string
+	}{
+		{name: "positive_pname", rule: "pname(curl) -> direct"},
+		{name: "negative_pname", rule: "!pname(curl) -> direct"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			sections, err := config_parser.Parse(`routing {
+				` + tt.rule + `
+				l4proto(tcp) -> proxy
+				fallback: block
+			}`)
+			if err != nil {
+				t.Fatalf("Parse(routing): %v", err)
+			}
+			var rules []*config_parser.RoutingRule
+			var fallback config.FunctionOrString
+			for _, item := range sections[0].Items {
+				switch value := item.Value.(type) {
+				case *config_parser.RoutingRule:
+					rules = append(rules, value)
+				case *config_parser.Param:
+					if value.Key == "fallback" {
+						fallback = value.Val
+					}
+				}
+			}
+
+			builder, err := NewRoutingMatcherBuilder(
+				logrus.New(),
+				rules,
+				map[string]uint8{
+					"block":  uint8(consts.OutboundBlock),
+					"direct": uint8(consts.OutboundDirect),
+					"proxy":  uint8(consts.OutboundUserDefinedMin),
+				},
+				nil,
+				fallback,
+			)
+			if err != nil {
+				t.Fatalf("NewRoutingMatcherBuilder(%s): %v", tt.name, err)
+			}
+			matcher, err := builder.BuildUserspace()
+			if err != nil {
+				t.Fatalf("BuildUserspace(%s): %v", tt.name, err)
+			}
+
+			outbound, _, _, _, err := matcher.MatchWithDrop(
+				src.Addr().As16(),
+				dst.Addr().As16(),
+				src.Port(),
+				dst.Port(),
+				consts.IpVersion_4,
+				consts.L4ProtoType_TCP,
+				"",
+				[16]uint8{},
+				0,
+				[16]uint8{},
+			)
+			if err != nil {
+				t.Fatalf("MatchWithDrop(%s): %v", tt.name, err)
+			}
+			if outbound != consts.OutboundUserDefinedMin {
+				t.Fatalf("MatchWithDrop(%s) outbound = %v, want %v", tt.name, outbound, consts.OutboundUserDefinedMin)
 			}
 		})
 	}

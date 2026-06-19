@@ -189,7 +189,11 @@ func (m *RoutingMatcher) MatchWithDrop(
 				goodSubrule = true
 			}
 		case consts.MatchType_ProcessName:
-			if processName[0] != 0 && match.pname == processName {
+			if processName[0] == 0 {
+				// Missing process metadata means pname rules should not affect
+				// LAN traffic. Skip the whole rule so later rules can match.
+				badRule = true
+			} else if match.pname == processName {
 				goodSubrule = true
 			}
 		case consts.MatchType_Dscp:
