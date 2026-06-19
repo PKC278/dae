@@ -1285,6 +1285,15 @@ route_eval_match(struct route_ctx *ctx, const struct match_set *match_set,
 			"CHECK: pname, match_set->type: %u, not: %d, outbound: %u",
 			match_type, match_set->not, match_set->outbound);
 #endif
+		if (!is_wan) {
+			/*
+			 * LAN traffic has no reliable process metadata. Skip the
+			 * whole rule that depends on pname, including !pname(...),
+			 * so later rules can continue matching normally.
+			 */
+			ctx->route_state |= ROUTE_STATE_BAD_RULE;
+			break;
+		}
 		if (is_wan && equal16(match_set->pname, pname))
 			ctx->route_state |= ROUTE_STATE_GOOD_SUBRULE;
 		break;
