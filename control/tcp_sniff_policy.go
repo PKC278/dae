@@ -127,13 +127,16 @@ func newTcpSniffNegKey(dst netip.AddrPort, routingResult *bpfRoutingResult) tcpS
 }
 
 func (c *ControlPlane) shouldTryTcpSniff(dst netip.AddrPort, routingResult *bpfRoutingResult) bool {
+	if routingResult == nil {
+		return false
+	}
 	if c.sniffingTimeout <= 0 {
 		return false
 	}
-	if c.dialMode == consts.DialMode_Ip {
-		return false
+	if routingResult.NeedSniff != 0 {
+		return true
 	}
-	if routingResult == nil {
+	if c.dialMode == consts.DialMode_Ip {
 		return false
 	}
 	outbound := consts.OutboundIndex(routingResult.Outbound)
@@ -177,6 +180,11 @@ func (c *ControlPlane) shouldSkipTcpSniffByNegativeCache(key tcpSniffNegKey, now
 		return false
 	}
 	return entry.failures >= tcpSniffFailureThreshold
+}
+
+func (c *ControlPlane) shouldSkipTcpSniff(routingResult *bpfRoutingResult, key tcpSniffNegKey, now time.Time) bool {
+	return routingResult != nil && routingResult.NeedSniff == 0 &&
+		c.shouldSkipTcpSniffByNegativeCache(key, now)
 }
 
 func (c *ControlPlane) noteTcpSniffFailure(key tcpSniffNegKey, now time.Time) {

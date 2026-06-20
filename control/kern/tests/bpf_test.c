@@ -888,7 +888,7 @@ int testsetup_wan_egress_direct_mark_reroute(struct __sk_buff *skb)
 
 	if (!mark_tcp_seen(&key, &tcph, false,
 			   &outbound, &mark, &must, NULL,
-			   0, NULL, 0, NULL))
+			   0, NULL, 0, NULL, NULL))
 		return TC_ACT_SHOT;
 
 	return TC_ACT_OK;
@@ -920,6 +920,7 @@ int testsetup_conntrack_args_scratch_reset(struct __sk_buff *skb)
 	__u8 outbound = OUTBOUND_USER_DEFINED_MIN;
 	__u32 mark = 0x12345678;
 	__u8 must = 1;
+	__u8 need_sniff = 1;
 	char pname[TASK_COMM_LEN] = "conntrack-test";
 	struct conntrack_args *args =
 		bpf_map_lookup_elem(&conntrack_args_map, &zero_key);
@@ -927,8 +928,14 @@ int testsetup_conntrack_args_scratch_reset(struct __sk_buff *skb)
 	if (!args)
 		return TC_ACT_SHOT;
 
-	conntrack_args_set(args, &outbound, &mark, &must, NULL, 11, pname, 99, NULL);
-	conntrack_args_set(args, NULL, NULL, NULL, NULL, 0, NULL, 0, NULL);
+	conntrack_args_set(args, &outbound, &mark, &must, NULL, 11, pname, 99,
+			   NULL, &need_sniff);
+	if (args->need_sniff != 1) {
+		bpf_printk("args->need_sniff(%u) != 1\n", args->need_sniff);
+		return TC_ACT_SHOT;
+	}
+	conntrack_args_set(args, NULL, NULL, NULL, NULL, 0, NULL, 0, NULL,
+			   NULL);
 
 	if (args->flags != 0) {
 		bpf_printk("args->flags(%u) != 0\n", args->flags);
@@ -936,6 +943,10 @@ int testsetup_conntrack_args_scratch_reset(struct __sk_buff *skb)
 	}
 	if (args->dscp != 0) {
 		bpf_printk("args->dscp(%u) != 0\n", args->dscp);
+		return TC_ACT_SHOT;
+	}
+	if (args->need_sniff != 0) {
+		bpf_printk("args->need_sniff(%u) != 0\n", args->need_sniff);
 		return TC_ACT_SHOT;
 	}
 	if (conntrack_args_pname_or_null(args)) {

@@ -607,9 +607,6 @@ func newControlPlaneWithContextOptions(
 		return nil, err
 	}
 	sniffingTimeout := global.SniffingTimeout
-	if dialMode == consts.DialMode_Ip {
-		sniffingTimeout = 0
-	}
 	disableKernelAliveCallback := dialMode != consts.DialMode_Ip
 	_direct, directProperty := dialer.NewDirectDialer(option, true)
 	direct := dialer.NewDialerContext(context.Background(), _direct, option, dialer.InstanceOption{DisableCheck: true}, directProperty)
@@ -752,6 +749,7 @@ func newControlPlaneWithContextOptions(
 	if err != nil {
 		return nil, fmt.Errorf("RoutingMatcherBuilder.BuildUserspace: %w", err)
 	}
+	core.domainRouting.setDecisionFromMergedBitmap(routingMatcher.domainRoutingDecisionFromBitmap)
 
 	// Get referenced outbounds to limit health checks.
 	referencedOutbounds := builder.GetReferencedOutbounds()
@@ -1353,13 +1351,15 @@ func (c *ControlPlane) dnsControllerOption() *DnsControllerOption {
 			return nil
 		},
 		NewCache: func(fqdn string, answers, ns, extra []dnsmessage.RR, deadline time.Time, originalDeadline time.Time) (cache *DnsCache, err error) {
+			domainBitmap, domainDecision := c.routingMatcher.DomainRoutingDecision(fqdn)
 			return &DnsCache{
-				DomainBitmap:     c.routingMatcher.domainMatcher.MatchDomainBitmap(fqdn),
-				NS:               ns,
-				Extra:            extra,
-				Answer:           answers,
-				Deadline:         deadline,
-				OriginalDeadline: originalDeadline,
+				DomainBitmap:          domainBitmap,
+				DomainRoutingDecision: domainDecision,
+				NS:                    ns,
+				Extra:                 extra,
+				Answer:                answers,
+				Deadline:              deadline,
+				OriginalDeadline:      originalDeadline,
 			}, nil
 		},
 		BestDialerChooser: c.chooseBestDnsDialer,
@@ -1524,7 +1524,15 @@ func (c *ControlPlane) replayDnsReloadCache() {
 	if c == nil || c.dnsController == nil || c.pendingDnsReloadCache == nil {
 		return
 	}
-	count := c.dnsController.RestoreReloadCache(c.pendingDnsReloadCache, c.routingMatcher.domainMatcher.MatchDomainBitmap, time.Now())
+	count := c.dnsController.RestoreReloadCache(
+		c.pendingDnsReloadCache,
+		c.routingMatcher.domainMatcher.MatchDomainBitmap,
+		func(fqdn string) domainRoutingDecision {
+			_, decision := c.routingMatcher.DomainRoutingDecision(fqdn)
+			return decision
+		},
+		time.Now(),
+	)
 	if count > 0 {
 		c.log.Infof("Restored %d DNS cache entries from previous control plane", count)
 	}
@@ -3520,6 +3528,10 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 				}
 
 				if !c.udpRouteScopeSensitive && freshRoutingResult != nil {
+					// handlePkt may replace an ambiguous IP-level decision after
+					// sniffing QUIC. Cache the final decision, not the stale value
+					// retrieved from conn state before sniffing.
+					*freshRoutingResult = *routingResult
 					updatedCache := false
 					if ue, ok := DefaultUdpEndpointPool.Get(flowDecision.CachedRoutingEndpointKey()); ok {
 						ue.UpdateCachedRoutingResult(realDst, unix.IPPROTO_UDP, freshRoutingResult)

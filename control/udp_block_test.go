@@ -86,3 +86,52 @@ func TestHandlePkt_BlockOutboundTreatsClosedDialAsExpectedReject(t *testing.T) {
 		t.Fatalf("pooled UDP endpoints after block = %d, want 0", got)
 	}
 }
+
+func TestShouldDropUdpBeforeSniffPreservesAmbiguousFlow(t *testing.T) {
+	if !shouldDropUdpBeforeSniff(&bpfRoutingResult{Drop: 1}) {
+		t.Fatal("unambiguous drop should be applied before sniffing")
+	}
+	if shouldDropUdpBeforeSniff(&bpfRoutingResult{Drop: 1, NeedSniff: 1}) {
+		t.Fatal("ambiguous drop should wait for the sniffed-domain decision")
+	}
+}
+
+func TestHandlePktFallsBackToIpRoutingForUnsniffableAmbiguousUdp(t *testing.T) {
+	oldPool := DefaultUdpEndpointPool
+	DefaultUdpEndpointPool = NewUdpEndpointPool()
+	defer func() {
+		DefaultUdpEndpointPool.Reset()
+		DefaultUdpEndpointPool = oldPool
+	}()
+
+	conn := &udpReuseSimulationConn{
+		reads:   make(chan scriptedPacketRead),
+		closeCh: make(chan struct{}),
+	}
+	d, underlay := newCountingProxyEndpointDialer("hysteria2", "proxy.example:443", conn)
+	cp := newUdpReuseSimulationControlPlane(newTestFixedOutboundGroup(d))
+	src := mustParseAddrPort("192.168.89.3:42687")
+	dst := mustParseAddrPort("203.0.113.50:1234")
+	payload := []byte{0x01, 0x02, 0x03, 0x04}
+	flowDecision := ClassifyUdpFlow(src, dst, payload)
+	routingResult := &bpfRoutingResult{
+		Outbound:  uint8(consts.OutboundUserDefinedMin),
+		NeedSniff: 1,
+	}
+
+	if err := cp.handlePkt(nil, payload, src, dst, routingResult, flowDecision, false); err != nil {
+		t.Fatalf("handlePkt() error = %v, want IP-routing fallback", err)
+	}
+	if routingResult.NeedSniff != 0 {
+		t.Fatal("IP-routing fallback should clear NeedSniff")
+	}
+	if got := underlay.calls.Load(); got != 1 {
+		t.Fatalf("DialContext calls after sniff miss = %d, want 1", got)
+	}
+	if got := conn.writeCalls.Load(); got != 1 {
+		t.Fatalf("WriteTo calls after sniff miss = %d, want 1", got)
+	}
+	if got := countPooledUdpEndpoints(DefaultUdpEndpointPool); got != 1 {
+		t.Fatalf("pooled UDP endpoints after IP-routing fallback = %d, want 1", got)
+	}
+}

@@ -141,6 +141,8 @@ struct routing_result {
 	__u32 pid;
 	__u8 dscp;
 	__u8 drop;
+	__u8 need_sniff;
+	__u8 padding;
 };
 
 struct tuples_key {
@@ -287,6 +289,8 @@ struct {
 
 struct domain_routing {
 	__u32 bitmap[MAX_MATCH_SET_LEN / 32];
+	__u8 ambiguous;
+	__u8 padding[3];
 };
 
 // domain_routing_map: domain → routing bitmap cache (HASH, no LRU).
@@ -332,11 +336,13 @@ union routing_meta {
 
 #define ROUTING_META_HAS_ROUTING BIT(0)
 #define ROUTING_META_DROP        BIT(1)
+#define ROUTING_META_NEED_SNIFF  BIT(2)
 #define ROUTE_RESULT_DROP_SHIFT  41
+#define ROUTE_RESULT_NEED_SNIFF_SHIFT 42
 
 static __always_inline union routing_meta
 build_routing_meta(__u8 outbound, __u32 mark, __u8 must, __u8 dscp,
-		   __u8 drop)
+		   __u8 drop, __u8 need_sniff)
 {
 	union routing_meta meta = { 0 };
 
@@ -345,13 +351,19 @@ build_routing_meta(__u8 outbound, __u32 mark, __u8 must, __u8 dscp,
 	meta.data.must = must;
 	meta.data.dscp = dscp;
 	meta.data.has_routing = ROUTING_META_HAS_ROUTING |
-				(drop ? ROUTING_META_DROP : 0);
+				(drop ? ROUTING_META_DROP : 0) |
+				(need_sniff ? ROUTING_META_NEED_SNIFF : 0);
 	return meta;
 }
 
 static __always_inline bool routing_meta_drop(union routing_meta meta)
 {
 	return meta.data.has_routing & ROUTING_META_DROP;
+}
+
+static __always_inline bool routing_meta_need_sniff(union routing_meta meta)
+{
+	return meta.data.has_routing & ROUTING_META_NEED_SNIFF;
 }
 
 static __always_inline void
@@ -1060,6 +1072,7 @@ enum route_state_flags {
 	ROUTE_STATE_GOOD_SUBRULE = 1U << 1,
 	ROUTE_STATE_MUST = 1U << 2,
 	ROUTE_STATE_DNS_QUERY = 1U << 3,
+	ROUTE_STATE_DOMAIN_AMBIGUOUS = 1U << 4,
 };
 
 struct wan_egress_route_scratch {
@@ -1088,6 +1101,8 @@ struct conntrack_args {
 	__u8 must;
 	__u8 dscp;
 	__u8 drop;
+	__u8 need_sniff;
+	__u8 padding0[3];
 	__u32 mark;
 	__u32 pid;
 	__u8 mac[6];
@@ -1105,7 +1120,8 @@ struct {
 static __always_inline void
 conntrack_args_set(struct conntrack_args *a,
 		   __u8 *outbound, __u32 *mark, __u8 *must, __u8 *mac,
-		   __u8 dscp, const char *pname, __u32 pid, __u8 *drop)
+		   __u8 dscp, const char *pname, __u32 pid, __u8 *drop,
+		   __u8 *need_sniff)
 {
 	__u8 flags = 0;
 
@@ -1113,6 +1129,7 @@ conntrack_args_set(struct conntrack_args *a,
 	a->must = 0;
 	a->dscp = dscp;
 	a->drop = 0;
+	a->need_sniff = 0;
 	a->mark = 0;
 	a->pid = 0;
 	__builtin_memset(a->mac, 0, sizeof(a->mac));
@@ -1124,6 +1141,7 @@ conntrack_args_set(struct conntrack_args *a,
 		a->mark = *mark;
 		a->must = *must;
 		a->drop = drop ? *drop : 0;
+		a->need_sniff = need_sniff ? *need_sniff : 0;
 	}
 	if (mac) {
 		flags |= CT_ARGS_HAS_MAC;
@@ -1195,6 +1213,8 @@ static __always_inline int route_match_domain_set(struct route_ctx *ctx,
 				domain_routing->bitmap[bitmap_word_idx];
 		else
 			ctx->domain_word_bits = 0;
+		if (domain_routing && domain_routing->ambiguous)
+			ctx->route_state |= ROUTE_STATE_DOMAIN_AMBIGUOUS;
 		ctx->domain_word_cached = true;
 	}
 
@@ -1386,7 +1406,10 @@ route_finalize_match(struct route_ctx *ctx, const struct match_set *match_set)
 					      ((__s64)match_set->mark << 8) |
 					      ((__s64)must << 40) |
 					      ((__s64)match_set->drop <<
-					       ROUTE_RESULT_DROP_SHIFT);
+					       ROUTE_RESULT_DROP_SHIFT) |
+					      ((__s64)!!(ctx->route_state &
+							 ROUTE_STATE_DOMAIN_AMBIGUOUS)
+					       << ROUTE_RESULT_NEED_SNIFF_SHIFT);
 #ifdef __DEBUG_ROUTING
 				bpf_printk("outbound %u: %ld",
 					   match_outbound, ctx->result);
@@ -1568,7 +1591,8 @@ static __always_inline void
 fill_routing_result(struct routing_result *dst,
 		    __u32 mark, __u8 must, __u8 outbound,
 		    const __u8 mac[6], __u8 dscp,
-		    const char *pname, __u32 pid, __u8 drop)
+		    const char *pname, __u32 pid, __u8 drop,
+		    __u8 need_sniff)
 {
 	__builtin_memset(dst, 0, sizeof(*dst));
 	dst->mark = mark;
@@ -1577,6 +1601,7 @@ fill_routing_result(struct routing_result *dst,
 	dst->pid = pid;
 	dst->dscp = dscp;
 	dst->drop = drop;
+	dst->need_sniff = need_sniff;
 	if (mac)
 		__builtin_memcpy(dst->mac, mac, sizeof(dst->mac));
 	if (pname)
@@ -1587,7 +1612,8 @@ static __always_inline int
 publish_filled_routing_handoff(const struct tuples_key *tuples,
 			       __u32 mark, __u8 must, __u8 outbound,
 			       const __u8 mac[6], __u8 dscp,
-			       const char *pname, __u32 pid, __u8 drop)
+			       const char *pname, __u32 pid, __u8 drop,
+			       __u8 need_sniff)
 {
 	__u32 zero = 0;
 	struct routing_handoff_entry *handoff =
@@ -1599,7 +1625,7 @@ publish_filled_routing_handoff(const struct tuples_key *tuples,
 	__builtin_memset(handoff, 0, sizeof(*handoff));
 	handoff->last_seen_ns = bpf_ktime_get_ns();
 	fill_routing_result(&handoff->result, mark, must, outbound, mac, dscp,
-			    pname, pid, drop);
+			    pname, pid, drop, need_sniff);
 	ret = bpf_map_update_elem(&routing_handoff_map, tuples, handoff, BPF_ANY);
 	if (ret)
 		bpf_printk("routing_handoff update failed: %d", (int)ret);
@@ -1771,7 +1797,8 @@ __mark_udp_seen(struct tuples_key *key, bool is_wan_ingress_direction,
 			union routing_meta meta =
 				build_routing_meta(args->outbound, args->mark,
 						   args->must, args->dscp,
-						   args->drop);
+						   args->drop,
+						   args->need_sniff);
 
 			if (args->flags & CT_ARGS_HAS_MAC)
 				__builtin_memcpy(state->mac, args->mac, 6);
@@ -1796,7 +1823,8 @@ __mark_udp_seen(struct tuples_key *key, bool is_wan_ingress_direction,
 	if (has_rt) {
 		new_state.meta = build_routing_meta(args->outbound, args->mark,
 						    args->must, args->dscp,
-						    args->drop);
+						    args->drop,
+						    args->need_sniff);
 		if (args->flags & CT_ARGS_HAS_MAC)
 			__builtin_memcpy(new_state.mac, args->mac, 6);
 		if (args->flags & CT_ARGS_HAS_PNAME)
@@ -1830,7 +1858,8 @@ __mark_udp_seen(struct tuples_key *key, bool is_wan_ingress_direction,
 static __always_inline struct conn_state *
 mark_udp_seen(struct tuples_key *key, bool is_wan_ingress_direction,
 	      __u8 *outbound, __u32 *mark, __u8 *must, __u8 *mac,
-	      __u8 dscp, const char *pname, __u32 pid, __u8 *drop)
+	      __u8 dscp, const char *pname, __u32 pid, __u8 *drop,
+	      __u8 *need_sniff)
 {
 	__u32 zero = 0;
 	struct conntrack_args *args =
@@ -1838,7 +1867,8 @@ mark_udp_seen(struct tuples_key *key, bool is_wan_ingress_direction,
 
 	if (unlikely(!args))
 		return NULL;
-	conntrack_args_set(args, outbound, mark, must, mac, dscp, pname, pid, drop);
+	conntrack_args_set(args, outbound, mark, must, mac, dscp, pname, pid, drop,
+			   need_sniff);
 	return __mark_udp_seen(key, is_wan_ingress_direction, args);
 }
 
@@ -1903,7 +1933,8 @@ __mark_tcp_seen(struct tuples_key *key, bool is_wan_ingress_direction,
 			union routing_meta meta =
 				build_routing_meta(args->outbound, args->mark,
 						   args->must, args->dscp,
-						   args->drop);
+						   args->drop,
+						   args->need_sniff);
 
 			if (args->flags & CT_ARGS_HAS_MAC)
 				__builtin_memcpy(state->mac, args->mac, 6);
@@ -1933,7 +1964,8 @@ __mark_tcp_seen(struct tuples_key *key, bool is_wan_ingress_direction,
 							    args->mark,
 							    args->must,
 							    args->dscp,
-							    args->drop);
+							    args->drop,
+							    args->need_sniff);
 			if (args->flags & CT_ARGS_HAS_MAC)
 				__builtin_memcpy(new_state.mac, args->mac, 6);
 			if (args->flags & CT_ARGS_HAS_PNAME)
@@ -1972,7 +2004,8 @@ static __always_inline struct conn_state *
 mark_tcp_seen(struct tuples_key *key, const struct tcphdr *tcph,
 	      bool is_wan_ingress_direction,
 	      __u8 *outbound, __u32 *mark, __u8 *must, __u8 *mac,
-	      __u8 dscp, const char *pname, __u32 pid, __u8 *drop)
+	      __u8 dscp, const char *pname, __u32 pid, __u8 *drop,
+	      __u8 *need_sniff)
 {
 	__u32 zero = 0;
 	struct conntrack_args *args =
@@ -1980,7 +2013,8 @@ mark_tcp_seen(struct tuples_key *key, const struct tcphdr *tcph,
 
 	if (unlikely(!args))
 		return NULL;
-	conntrack_args_set(args, outbound, mark, must, mac, dscp, pname, pid, drop);
+	conntrack_args_set(args, outbound, mark, must, mac, dscp, pname, pid, drop,
+			   need_sniff);
 
 	__u8 tcp_flags = 0;
 
@@ -2036,7 +2070,7 @@ static __noinline int do_tproxy_lan_egress(struct __sk_buff *skb, __u32 link_h_l
 		// janitor backstop expires.
 		mark_tcp_seen(&reversed_tuples_key, &ctx->tcph, true,
 			      NULL, NULL, NULL, NULL,
-			      0, NULL, 0, NULL);
+			      0, NULL, 0, NULL, NULL);
 	} else if (ctx->l4proto == IPPROTO_UDP) {
 		if (ctx->udph.source == bpf_htons(53) || ctx->udph.dest == bpf_htons(53))
 			return TC_ACT_PIPE;
@@ -2049,7 +2083,7 @@ static __noinline int do_tproxy_lan_egress(struct __sk_buff *skb, __u32 link_h_l
 		copy_reversed_tuples(&tuples.five, &reversed_tuples_key);
 		mark_udp_seen(&reversed_tuples_key, true,
 			      NULL, NULL, NULL, NULL,
-			      0, NULL, 0, NULL);
+			      0, NULL, 0, NULL, NULL);
 	}
 
 	return TC_ACT_PIPE;
@@ -2095,7 +2129,8 @@ redirect_lan_packet_to_control_plane(struct __sk_buff *skb, __u32 link_h_len,
 				       pkt->ethh.h_source,
 				       routing_meta.data.dscp,
 				       NULL, 0,
-				       routing_meta_drop(routing_meta));
+				       routing_meta_drop(routing_meta),
+				       routing_meta_need_sniff(routing_meta));
 	return redirect_to_control_plane_ingress();
 }
 
@@ -2142,7 +2177,7 @@ static __noinline int do_tproxy_lan_ingress(struct __sk_buff *skb, __u32 link_h_
 		// Track TCP connection state; reuse returned pointer.
 		tcp_state = mark_tcp_seen(&pkt->tuples.five, &pkt->tcph, false,
 					  NULL, NULL, NULL, NULL,
-					  0, NULL, 0, NULL);
+					  0, NULL, 0, NULL, NULL);
 		// No cached state for an established packet: keep the historical
 		// passthrough behavior instead of recomputing routing.
 		if (!tcp_state)
@@ -2162,6 +2197,14 @@ static __noinline int do_tproxy_lan_ingress(struct __sk_buff *skb, __u32 link_h_
 		// Load routing from the conn_state we already looked up
 		outbound = tcp_state->meta.data.outbound;
 		mark = tcp_state->meta.data.mark;
+
+		/* The cached route is only an IP-level candidate while domains sharing
+		 * the destination disagree. Keep every packet on the control-plane path
+		 * until userspace has sniffed the domain and selected the exact route.
+		 */
+		if (routing_meta_need_sniff(tcp_state->meta))
+			return redirect_lan_packet_to_control_plane(
+				skb, link_h_len, pkt, tcp_state->meta.raw);
 
 		if (outbound == OUTBOUND_DIRECT) {
 			skb->mark = mark;
@@ -2191,14 +2234,16 @@ static __noinline int do_tproxy_lan_ingress(struct __sk_buff *skb, __u32 link_h_
 		// cascade deletion when the connection expires.
 		tcp_state = mark_tcp_seen(&pkt->tuples.five, &pkt->tcph, false,
 					  NULL, NULL, NULL, NULL,
-					  pkt->tuples.dscp, NULL, 0, NULL);
+					  pkt->tuples.dscp, NULL, 0, NULL,
+					  NULL);
 		route_flag[0] = L4ProtoType_TCP;
 	} else {
 		if (!is_short_lived_udp_traffic(&pkt->tuples.five)) {
 			// Fast path: Check conn state for established UDP flows
 			udp_state = mark_udp_seen(&pkt->tuples.five, false,
 						  NULL, NULL, NULL, NULL,
-						  pkt->tuples.dscp, NULL, 0, NULL);
+						  pkt->tuples.dscp, NULL, 0,
+						  NULL, NULL);
 			// Robustness: If conntrack map is full (conn_state == NULL),
 			// gracefully degrade by continuing with normal routing instead of
 			// dropping the packet. We lose the "direct return path" optimization
@@ -2213,6 +2258,16 @@ static __noinline int do_tproxy_lan_ingress(struct __sk_buff *skb, __u32 link_h_
 				// Load routing from conn state - skip expensive route() call!
 				__u8 outbound = udp_state->meta.data.outbound;
 				__u32 mark = udp_state->meta.data.mark;
+
+				/* QUIC ClientHello data may span multiple Initial packets. Do
+				 * not let the provisional IP-level route bypass the sniffer.
+				 */
+				if (routing_meta_need_sniff(udp_state->meta)) {
+					udp_state->last_seen_ns = bpf_ktime_get_ns();
+					return redirect_lan_packet_to_control_plane(
+						skb, link_h_len, pkt,
+						udp_state->meta.raw);
+				}
 
 				if (outbound == OUTBOUND_DIRECT) {
 					skb->mark = mark;
@@ -2326,6 +2381,7 @@ static __noinline int do_tproxy_lan_ingress(struct __sk_buff *skb, __u32 link_h_
 	__u32 mark = s64_ret >> 8;
 	__u8 must = (s64_ret >> 40) & 1;
 	__u8 drop = (s64_ret >> ROUTE_RESULT_DROP_SHIFT) & 1;
+	__u8 need_sniff = (s64_ret >> ROUTE_RESULT_NEED_SNIFF_SHIFT) & 1;
 
 	// Cache routing in conn state (skip DNS to avoid map churn).
 	if (pkt->l4proto == IPPROTO_UDP &&
@@ -2336,20 +2392,20 @@ static __noinline int do_tproxy_lan_ingress(struct __sk_buff *skb, __u32 link_h_
 		__builtin_memcpy(tcp_state->mac, pkt->ethh.h_source, 6);
 		union routing_meta _m = build_routing_meta(outbound, mark, must,
 							    pkt->tuples.dscp,
-							    drop);
+							    drop, need_sniff);
 		publish_routing_meta(&tcp_state->meta, _m);
 	} else if (pkt->l4proto == IPPROTO_UDP && udp_state) {
 		// Directly update the UDP conn state we already looked up
 		__builtin_memcpy(udp_state->mac, pkt->ethh.h_source, 6);
 		union routing_meta _m = build_routing_meta(outbound, mark, must,
 							    pkt->tuples.dscp,
-							    drop);
+							    drop, need_sniff);
 		publish_routing_meta(&udp_state->meta, _m);
 	}
 
 	// Fail-closed: TCP without conn state must drop to prevent traffic leakage.
 	if (pkt->l4proto == IPPROTO_TCP && !tcp_state) {
-		if (outbound == OUTBOUND_DIRECT && mark == 0) {
+		if (outbound == OUTBOUND_DIRECT && mark == 0 && !need_sniff) {
 			skb->mark = mark;
 #if defined(__DEBUG_ROUTING) || defined(__PRINT_ROUTING_RESULT)
 			bpf_printk("tcp(lan): GO OUTBOUND_DIRECT (MAP FULL)");
@@ -2377,13 +2433,19 @@ static __noinline int do_tproxy_lan_ingress(struct __sk_buff *skb, __u32 link_h_
 	}
 #endif
 
-	if (outbound == OUTBOUND_DIRECT) {
+	if (outbound == OUTBOUND_DIRECT && !need_sniff) {
 		skb->mark = mark;
 #if defined(__DEBUG_ROUTING) || defined(__PRINT_ROUTING_RESULT)
 		bpf_printk("GO OUTBOUND DIRECT");
 #endif
 		goto direct;
 	} else if (unlikely(outbound == OUTBOUND_BLOCK)) {
+		if (need_sniff)
+			return redirect_lan_packet_to_control_plane(
+				skb, link_h_len, pkt,
+				build_routing_meta(outbound, mark, must,
+						   pkt->tuples.dscp, drop,
+						   need_sniff).raw);
 #if defined(__DEBUG_ROUTING) || defined(__PRINT_ROUTING_RESULT)
 		bpf_printk("SHOT OUTBOUND_BLOCK");
 #endif
@@ -2396,16 +2458,17 @@ static __noinline int do_tproxy_lan_ingress(struct __sk_buff *skb, __u32 link_h_
 		return redirect_lan_packet_to_control_plane(
 			skb, link_h_len, pkt,
 			build_routing_meta(outbound, mark, must,
-					   pkt->tuples.dscp, drop).raw);
+					   pkt->tuples.dscp, drop, 0).raw);
 	}
 
-	if (!wan_outbound_is_alive(skb, outbound, pkt->l4proto,
+	if (!need_sniff &&
+	    !wan_outbound_is_alive(skb, outbound, pkt->l4proto,
 				   pkt->tuples.five.dport))
 		goto block;
 	return redirect_lan_packet_to_control_plane(
 		skb, link_h_len, pkt,
 		build_routing_meta(outbound, mark, must, pkt->tuples.dscp,
-				   drop).raw);
+				   drop, need_sniff).raw);
 
 direct:
 	return TC_ACT_OK;
@@ -2490,7 +2553,7 @@ static __noinline int do_tproxy_wan_ingress(struct __sk_buff *skb, __u32 link_h_
 		copy_reversed_tuples(&tuples.five, &reversed_tuples_key);
 		mark_tcp_seen(&reversed_tuples_key, &ctx->tcph, true,
 			      NULL, NULL, NULL, NULL,
-			      0, NULL, 0, NULL);
+			      0, NULL, 0, NULL, NULL);
 	} else if (ctx->l4proto == IPPROTO_UDP) {
 		if (ctx->udph.source == bpf_htons(53) || ctx->udph.dest == bpf_htons(53))
 			return TC_ACT_PIPE;
@@ -2503,7 +2566,7 @@ static __noinline int do_tproxy_wan_ingress(struct __sk_buff *skb, __u32 link_h_
 		copy_reversed_tuples(&tuples.five, &reversed_tuples_key);
 		mark_udp_seen(&reversed_tuples_key, true,
 			      NULL, NULL, NULL, NULL,
-			      0, NULL, 0, NULL);
+			      0, NULL, 0, NULL, NULL);
 	}
 
 	return TC_ACT_PIPE;
@@ -2565,6 +2628,7 @@ do_tproxy_wan_egress_tcp(struct __sk_buff *skb, __u32 link_h_len,
 	__u8 outbound;
 	bool must;
 	__u8 drop = 0;
+	__u8 need_sniff = 0;
 	__u32 mark;
 	struct pid_pname *pid_pname = NULL;
 	const char *handoff_pname = NULL;
@@ -2615,6 +2679,7 @@ do_tproxy_wan_egress_tcp(struct __sk_buff *skb, __u32 link_h_len,
 		mark = s64_ret >> 8;
 		must = (s64_ret >> 40) & 1;
 		drop = (s64_ret >> ROUTE_RESULT_DROP_SHIFT) & 1;
+		need_sniff = (s64_ret >> ROUTE_RESULT_NEED_SNIFF_SHIFT) & 1;
 		scratch->must_val = must;
 
 		__u8 dscp = tuples->dscp;
@@ -2634,7 +2699,8 @@ do_tproxy_wan_egress_tcp(struct __sk_buff *skb, __u32 link_h_len,
 		__u8 *must_ptr = &scratch->must_val;
 		__u8 *drop_ptr = &drop;
 
-		if (outbound == OUTBOUND_DIRECT && mark == 0 && !must && !drop) {
+		if (outbound == OUTBOUND_DIRECT && mark == 0 && !must && !drop &&
+		    !need_sniff) {
 			outbound_ptr = NULL;
 			mark_ptr = NULL;
 			must_ptr = NULL;
@@ -2644,10 +2710,11 @@ do_tproxy_wan_egress_tcp(struct __sk_buff *skb, __u32 link_h_len,
 		struct conn_state *tcp_conn = mark_tcp_seen(
 			&tuples->five, tcph, false, outbound_ptr, mark_ptr,
 			must_ptr, scratch->mac, dscp, pname_str, pid_val,
-			drop_ptr);
+			drop_ptr, &need_sniff);
 
 		if (!tcp_conn) {
-			if (outbound == OUTBOUND_DIRECT && mark == 0)
+			if (outbound == OUTBOUND_DIRECT && mark == 0 &&
+			    !need_sniff)
 				return TC_ACT_PIPE;
 			return TC_ACT_SHOT;
 		}
@@ -2667,7 +2734,7 @@ do_tproxy_wan_egress_tcp(struct __sk_buff *skb, __u32 link_h_len,
 		struct conn_state *tcp_conn = mark_tcp_seen(
 			&tuples->five, tcph, false,
 			NULL, NULL, NULL, NULL,
-			0, NULL, 0, NULL);
+			0, NULL, 0, NULL, NULL);
 
 		if (!tcp_conn || !tcp_conn->meta.data.has_routing)
 			return TC_ACT_PIPE;
@@ -2676,13 +2743,14 @@ do_tproxy_wan_egress_tcp(struct __sk_buff *skb, __u32 link_h_len,
 		mark = tcp_conn->meta.data.mark;
 		must = tcp_conn->meta.data.must;
 		drop = routing_meta_drop(tcp_conn->meta);
+		need_sniff = routing_meta_need_sniff(tcp_conn->meta);
 		__builtin_memcpy(handoff_mac, tcp_conn->mac, 6);
 		__builtin_memcpy(scratch->mac, tcp_conn->mac, 6);
 		handoff_pname = (const char *)tcp_conn->pname;
 		handoff_pid = tcp_conn->pid;
 	}
 
-	if (!wan_egress_needs_control_plane(outbound, mark)) {
+	if (!wan_egress_needs_control_plane(outbound, mark) && !need_sniff) {
 #if defined(__DEBUG_ROUTING) || defined(__PRINT_ROUTING_RESULT)
 		bpf_printk("GO OUTBOUND_DIRECT");
 #endif
@@ -2692,11 +2760,11 @@ do_tproxy_wan_egress_tcp(struct __sk_buff *skb, __u32 link_h_len,
 #if defined(__DEBUG_ROUTING) || defined(__PRINT_ROUTING_RESULT)
 		bpf_printk("SHOT OUTBOUND_BLOCK");
 #endif
-		if (drop)
+		if (drop && !need_sniff)
 			return TC_ACT_SHOT;
 	}
 
-	if (outbound != OUTBOUND_BLOCK &&
+	if (!need_sniff && outbound != OUTBOUND_BLOCK &&
 	    !wan_outbound_is_alive(skb, outbound, IPPROTO_TCP,
 				   tuples->five.dport))
 		return TC_ACT_SHOT;
@@ -2704,7 +2772,8 @@ do_tproxy_wan_egress_tcp(struct __sk_buff *skb, __u32 link_h_len,
 	/* TCP has embedded conn-state routing metadata; handoff is best-effort. */
 	publish_filled_routing_handoff(&tuples->five, mark, must, outbound,
 				       handoff_mac, tuples->dscp,
-				       handoff_pname, handoff_pid, drop);
+				       handoff_pname, handoff_pid, drop,
+				       need_sniff);
 
 	/* TCP needs redirect_track before the kernel-side handshake completes.
 	 * Publishing it later from userspace is too late for the first SYN path.
@@ -2727,6 +2796,7 @@ do_tproxy_wan_egress_udp(struct __sk_buff *skb, __u32 link_h_len,
 	__u32 mark;
 	bool must;
 	__u8 drop = 0;
+	__u8 need_sniff = 0;
 	struct conn_state *udp_conn_state = NULL;
 	__u8 mac[6] = {};
 	const char *handoff_pname = NULL;
@@ -2752,7 +2822,7 @@ do_tproxy_wan_egress_udp(struct __sk_buff *skb, __u32 link_h_len,
 	if (!is_short_lived_udp_traffic(&tuples->five)) {
 		udp_conn_state = mark_udp_seen(&tuples->five, false,
 					       NULL, NULL, NULL, NULL,
-					       0, NULL, 0, NULL);
+					       0, NULL, 0, NULL, NULL);
 		if (udp_conn_state && udp_conn_state->is_wan_ingress_direction)
 			return TC_ACT_PIPE;
 
@@ -2761,6 +2831,7 @@ do_tproxy_wan_egress_udp(struct __sk_buff *skb, __u32 link_h_len,
 			mark = udp_conn_state->meta.data.mark;
 			must = udp_conn_state->meta.data.must;
 			drop = routing_meta_drop(udp_conn_state->meta);
+			need_sniff = routing_meta_need_sniff(udp_conn_state->meta);
 			__builtin_memcpy(mac, udp_conn_state->mac, 6);
 			handoff_pname = (const char *)udp_conn_state->pname;
 			handoff_pid = udp_conn_state->pid;
@@ -2800,10 +2871,11 @@ do_tproxy_wan_egress_udp(struct __sk_buff *skb, __u32 link_h_len,
 	mark = s64_ret >> 8;
 	must = (s64_ret >> 40) & 1;
 	drop = (s64_ret >> ROUTE_RESULT_DROP_SHIFT) & 1;
+	need_sniff = (s64_ret >> ROUTE_RESULT_NEED_SNIFF_SHIFT) & 1;
 
 fast_path_skip_routing:
 	if (udp_conn_state && tuples->five.dport != bpf_htons(53)) {
-		if (outbound != OUTBOUND_DIRECT || mark != 0 || must) {
+		if (outbound != OUTBOUND_DIRECT || mark != 0 || must || need_sniff) {
 			__builtin_memcpy(udp_conn_state->mac, mac, 6);
 			if (pid_pname) {
 				__builtin_memcpy(udp_conn_state->pname,
@@ -2815,7 +2887,8 @@ fast_path_skip_routing:
 								   mark,
 								   must,
 								   tuples->dscp,
-								   drop);
+								   drop,
+								   need_sniff);
 			publish_routing_meta(&udp_conn_state->meta, _m);
 		}
 		udp_conn_state->last_seen_ns = bpf_ktime_get_ns();
@@ -2830,14 +2903,14 @@ fast_path_skip_routing:
 		   tuples->five.dip.u6_addr32, bpf_ntohs(tuples->five.dport));
 #endif
 
-	if (!wan_egress_needs_control_plane(outbound, mark)) {
+	if (!wan_egress_needs_control_plane(outbound, mark) && !need_sniff) {
 		return TC_ACT_PIPE;
 	} else if (unlikely(outbound == OUTBOUND_BLOCK)) {
-		if (drop)
+		if (drop && !need_sniff)
 			return TC_ACT_SHOT;
 	}
 
-	if (outbound != OUTBOUND_BLOCK &&
+	if (!need_sniff && outbound != OUTBOUND_BLOCK &&
 	    !wan_outbound_is_alive(skb, outbound, IPPROTO_UDP,
 				   tuples->five.dport))
 		return TC_ACT_SHOT;
@@ -2847,7 +2920,7 @@ fast_path_skip_routing:
 
 	if (publish_filled_routing_handoff(&tuples->five, mark, must, outbound,
 					   mac, tuples->dscp, handoff_pname,
-					   handoff_pid, drop) &&
+					   handoff_pid, drop, need_sniff) &&
 	    handoff_mandatory)
 		return TC_ACT_SHOT;
 
