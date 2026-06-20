@@ -237,3 +237,99 @@ func (m *RoutingMatcher) MatchWithDrop(
 	}
 	return 0, 0, false, false, fmt.Errorf("no match set hit")
 }
+
+func domainBitmapHit(bitmap []uint32, index int) bool {
+	return bitmap != nil &&
+		index/32 < len(bitmap) &&
+		(bitmap[index/32]>>(index%32))&1 > 0
+}
+
+func (m *RoutingMatcher) DomainRoutingDecision(domain string) ([]uint32, domainRoutingDecision) {
+	var bitmap []uint32
+	if domain != "" {
+		bitmap = m.domainMatcher.MatchDomainBitmap(domain)
+	}
+	return bitmap, m.domainRoutingDecisionFromBitmap(bitmap)
+}
+
+func (m *RoutingMatcher) domainRoutingDecisionFromBitmap(bitmap []uint32) domainRoutingDecision {
+	matches := m.compiledMatches
+	must := false
+	for start := 0; start < len(matches); {
+		end := start
+		for end < len(matches) &&
+			(matches[end].outbound&consts.OutboundLogicalMask) == consts.OutboundLogicalMask {
+			end++
+		}
+		if end >= len(matches) {
+			return domainRoutingDecision{}
+		}
+		rule := matches[start : end+1]
+		start = end + 1
+
+		hasDomain := false
+		hasDomainHit := false
+		domainOnly := true
+		for i, match := range rule {
+			idx := start - len(rule) + i
+			switch match.matchType {
+			case consts.MatchType_DomainSet:
+				hasDomain = true
+				hit := domainBitmapHit(bitmap, idx)
+				if hit != match.not {
+					hasDomainHit = true
+				}
+			case consts.MatchType_Fallback:
+				// Fallback is unconditional and safe to classify.
+			default:
+				domainOnly = false
+			}
+		}
+
+		if hasDomain && hasDomainHit && !domainOnly {
+			return domainRoutingDecision{}
+		}
+		if !hasDomain && rule[len(rule)-1].matchType != consts.MatchType_Fallback {
+			continue
+		}
+
+		goodSubrule := false
+		badRule := false
+		for i, match := range rule {
+			idx := start - len(rule) + i
+			if !badRule && !goodSubrule {
+				switch match.matchType {
+				case consts.MatchType_DomainSet:
+					if domainBitmapHit(bitmap, idx) {
+						goodSubrule = true
+					}
+				case consts.MatchType_Fallback:
+					goodSubrule = true
+				}
+			}
+			if match.outbound != consts.OutboundLogicalOr {
+				if goodSubrule == match.not {
+					badRule = true
+				}
+				goodSubrule = false
+			}
+			if match.outbound&consts.OutboundLogicalMask != consts.OutboundLogicalMask {
+				if !badRule {
+					if match.outbound == consts.OutboundMustRules {
+						must = true
+						continue
+					}
+					return domainRoutingDecision{
+						Valid:    true,
+						Outbound: uint8(match.outbound),
+						Mark:     match.mark,
+						Must:     match.must || must,
+						Drop:     match.drop,
+					}
+				}
+				badRule = false
+			}
+		}
+	}
+	return domainRoutingDecision{}
+}

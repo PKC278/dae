@@ -499,14 +499,18 @@ func (c *ControlPlane) handlePkt(lConn *net.UDPConn, data []byte, src, realDst n
 	now := time.Now()
 	nowNano := now.UnixNano()
 	realSrc = src
-	if routingResult.Drop != 0 {
+	if shouldDropUdpBeforeSniff(routingResult) {
 		return nil
 	}
+	isQuicInitial := flowDecision.IsQuicInitial
+	requiresQuicDomainReroute := routingResult.NeedSniff != 0 && isQuicInitial && !skipSniffing
 	routeScope := udpEndpointRouteScope{}
+	routeScopeReady := false
 	forceSymmetricKey := false
-	if c.udpRouteScopeSensitive {
+	if c.udpRouteScopeSensitive && !requiresQuicDomainReroute {
 		routeScope = newUdpEndpointRouteScope(routingResult)
 		forceSymmetricKey = udpRouteScopeNeedsDestinationAffinity(routingResult)
+		routeScopeReady = true
 	}
 
 	// DNS Fast Path: Skip UdpEndpoint lookup for DNS traffic (port 53).
@@ -567,50 +571,51 @@ func (c *ControlPlane) handlePkt(lConn *net.UDPConn, data []byte, src, realDst n
 	// This avoids double sync.Map lookups by pre-selecting the appropriate key:
 	// - Symmetric NAT (Src+Dst) for confirmed QUIC/sniffing sessions on sniff-eligible UDP
 	// - Full-Cone NAT (Src-only) for other UDP traffic
-	isQuicInitial := flowDecision.IsQuicInitial
 	var quicSnifferKey PacketSnifferKey
 	failedQuicDcidKnown := false
 	if isQuicInitial {
 		quicSnifferKey = flowDecision.PacketSnifferKey()
 		failedQuicDcidKnown = IsQuicDcidFailedAt(quicSnifferKey, now)
 	}
-	ueKey = flowDecision.EndpointKeyForInitialLookupWithScope(routeScope, forceSymmetricKey)
-	ue, ueExists = DefaultUdpEndpointPool.Get(ueKey)
-	if !ueExists && !forceSymmetricKey {
-		if ueKey.Dst.Port() != 0 {
-			// Sniff-eligible UDP can re-enter here with a symmetric lookup even
-			// though the live session is already tracked under the cheaper
-			// src-only key. Reuse that exact src-only endpoint when it targets
-			// the same remote, otherwise we fork a second UdpEndpoint for the
-			// same 4-tuple and start another read loop.
-			srcOnlyKey := flowDecision.FullConeNatEndpointKeyWithScope(routeScope)
-			if srcOnlyKey != ueKey {
-				if candidate, ok := DefaultUdpEndpointPool.Get(srcOnlyKey); ok && candidate.DialTarget == realDst.String() {
-					ueKey = srcOnlyKey
-					ue = candidate
-					ueExists = true
+	if !requiresQuicDomainReroute {
+		ueKey = flowDecision.EndpointKeyForInitialLookupWithScope(routeScope, forceSymmetricKey)
+		ue, ueExists = DefaultUdpEndpointPool.Get(ueKey)
+		if !ueExists && !forceSymmetricKey {
+			if ueKey.Dst.Port() != 0 {
+				// Sniff-eligible UDP can re-enter here with a symmetric lookup even
+				// though the live session is already tracked under the cheaper
+				// src-only key. Reuse that exact src-only endpoint when it targets
+				// the same remote, otherwise we fork a second UdpEndpoint for the
+				// same 4-tuple and start another read loop.
+				srcOnlyKey := flowDecision.FullConeNatEndpointKeyWithScope(routeScope)
+				if srcOnlyKey != ueKey {
+					if candidate, ok := DefaultUdpEndpointPool.Get(srcOnlyKey); ok && candidate.DialTarget == realDst.String() {
+						ueKey = srcOnlyKey
+						ue = candidate
+						ueExists = true
+					}
 				}
-			}
-		} else {
-			// The reverse race also exists: a sniff-eligible packet may have
-			// already created a symmetric endpoint before a sibling ordinary
-			// packet reaches here. Probe that exact symmetric key before
-			// creating a new src-only endpoint so the visible UDP flow stays
-			// single-instanced.
-			symmetricKey := flowDecision.SymmetricNatEndpointKeyWithScope(routeScope)
-			if symmetricKey != ueKey {
-				if candidate, ok := DefaultUdpEndpointPool.Get(symmetricKey); ok && candidate.DialTarget == realDst.String() {
-					ueKey = symmetricKey
-					ue = candidate
-					ueExists = true
+			} else {
+				// The reverse race also exists: a sniff-eligible packet may have
+				// already created a symmetric endpoint before a sibling ordinary
+				// packet reaches here. Probe that exact symmetric key before
+				// creating a new src-only endpoint so the visible UDP flow stays
+				// single-instanced.
+				symmetricKey := flowDecision.SymmetricNatEndpointKeyWithScope(routeScope)
+				if symmetricKey != ueKey {
+					if candidate, ok := DefaultUdpEndpointPool.Get(symmetricKey); ok && candidate.DialTarget == realDst.String() {
+						ueKey = symmetricKey
+						ue = candidate
+						ueExists = true
+					}
 				}
 			}
 		}
-	}
-	if !ueExists {
-		if fallbackKey, ok := flowDecision.InitialLookupFallbackKeyWithScope(routeScope, forceSymmetricKey); ok {
-			ueKey = fallbackKey
-			ue, ueExists = DefaultUdpEndpointPool.Get(ueKey)
+		if !ueExists {
+			if fallbackKey, ok := flowDecision.InitialLookupFallbackKeyWithScope(routeScope, forceSymmetricKey); ok {
+				ueKey = fallbackKey
+				ue, ueExists = DefaultUdpEndpointPool.Get(ueKey)
+			}
 		}
 	}
 	if ueExists {
@@ -862,6 +867,45 @@ func (c *ControlPlane) handlePkt(lConn *net.UDPConn, data []byte, src, realDst n
 	}
 
 afterSniffing:
+	if domain != "" && routingResult.NeedSniff != 0 {
+		if err = c.rerouteUdpBySniffedDomain(realSrc, realDst, domain, routingResult); err != nil {
+			return err
+		}
+		if c.core == nil {
+			return fmt.Errorf("UDP conn-state owner is unavailable after domain reroute")
+		}
+		if err = c.core.updateUdpConnStateRouting(realSrc, realDst, routingResult); err != nil {
+			return err
+		}
+		if routingResult.Drop != 0 {
+			return nil
+		}
+		routeScopeReady = false
+	}
+	if routingResult.NeedSniff != 0 {
+		// Preserve dae's availability-first behavior: if the domain cannot be
+		// recovered, continue with the original IP-level routing decision. Clear
+		// the flag locally and best-effort persist it so later packets can return
+		// to the normal kernel fast path instead of repeatedly entering sniffing.
+		routingResult.NeedSniff = 0
+		if c.core != nil {
+			if updateErr := c.core.updateUdpConnStateRouting(realSrc, realDst, routingResult); updateErr != nil {
+				if c.log != nil && c.log.IsLevelEnabled(logrus.DebugLevel) {
+					c.log.WithError(updateErr).WithFields(logrus.Fields{
+						"src": realSrc.String(),
+						"dst": realDst.String(),
+					}).Debug("Failed to persist UDP IP-routing fallback after domain sniff miss")
+				}
+			}
+		}
+		if routingResult.Drop != 0 {
+			return nil
+		}
+	}
+	if c.udpRouteScopeSensitive && !routeScopeReady {
+		routeScope = newUdpEndpointRouteScope(routingResult)
+		forceSymmetricKey = udpRouteScopeNeedsDestinationAffinity(routingResult)
+	}
 	if routingResult.Mark == 0 {
 		routingResult.Mark = c.soMarkFromDae
 	}
@@ -1094,6 +1138,34 @@ getNew:
 		logger("%v <-> %v", RefineSourceToShow(realSrc, realDst.Addr()), dialTarget)
 	}
 
+	return nil
+}
+
+func shouldDropUdpBeforeSniff(routingResult *bpfRoutingResult) bool {
+	return routingResult != nil && routingResult.Drop != 0 && routingResult.NeedSniff == 0
+}
+
+func (c *ControlPlane) rerouteUdpBySniffedDomain(src, dst netip.AddrPort, domain string, routingResult *bpfRoutingResult) error {
+	if domain == "" || routingResult == nil {
+		return nil
+	}
+	outbound, mark, must, drop, err := c.Route(src, dst, domain, consts.L4ProtoType_UDP, routingResult)
+	if err != nil {
+		return err
+	}
+	routingResult.Outbound = uint8(outbound)
+	routingResult.Mark = mark
+	if must {
+		routingResult.Must = 1
+	} else {
+		routingResult.Must = 0
+	}
+	if drop {
+		routingResult.Drop = 1
+	} else {
+		routingResult.Drop = 0
+	}
+	routingResult.NeedSniff = 0
 	return nil
 }
 

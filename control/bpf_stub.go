@@ -40,8 +40,10 @@ type bpfDaeParam struct {
 }
 
 type bpfDomainRouting struct {
-	_      structs.HostLayout
-	Bitmap [32]uint32
+	_         structs.HostLayout
+	Bitmap    [32]uint32
+	Ambiguous uint8
+	_         [3]byte
 }
 
 type bpfMatchSet struct {
@@ -91,15 +93,17 @@ type bpfRedirectTuple struct {
 }
 
 type bpfRoutingResult struct {
-	_        structs.HostLayout
-	Mark     uint32
-	Must     uint8
-	Mac      [6]uint8
-	Outbound uint8
-	Pname    [16]uint8
-	Pid      uint32
-	Dscp     uint8
-	Drop     uint8
+	_         structs.HostLayout
+	Mark      uint32
+	Must      uint8
+	Mac       [6]uint8
+	Outbound  uint8
+	Pname     [16]uint8
+	Pid       uint32
+	Dscp      uint8
+	Drop      uint8
+	NeedSniff uint8
+	_         [1]byte
 }
 
 type bpfRoutingHandoffEntry struct {

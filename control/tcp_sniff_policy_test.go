@@ -12,11 +12,246 @@ import (
 	"net/netip"
 	"testing"
 	"time"
+
+	"github.com/daeuniverse/dae/common/consts"
+	"github.com/daeuniverse/dae/config"
+	"github.com/daeuniverse/dae/pkg/config_parser"
+	"github.com/sirupsen/logrus"
 )
 
 func mustParseTcpSniffAddrPort(t *testing.T, s string) netip.AddrPort {
 	t.Helper()
 	return netip.MustParseAddrPort(s)
+}
+
+func TestShouldTryTcpSniffAllowsAmbiguousDirectRouting(t *testing.T) {
+	cp := &ControlPlane{sniffingTimeout: time.Second}
+	dst := mustParseTcpSniffAddrPort(t, "198.51.100.20:443")
+
+	if cp.shouldTryTcpSniff(dst, &bpfRoutingResult{Outbound: uint8(consts.OutboundDirect)}) {
+		t.Fatal("plain direct routing should not sniff")
+	}
+	if !cp.shouldTryTcpSniff(dst, &bpfRoutingResult{
+		Outbound:  uint8(consts.OutboundDirect),
+		NeedSniff: 1,
+	}) {
+		t.Fatal("ambiguous direct routing should sniff")
+	}
+}
+
+func TestShouldTryTcpSniffRequiresAmbiguousDomainAcrossNormalExclusions(t *testing.T) {
+	cp := &ControlPlane{
+		sniffingTimeout: time.Second,
+		controlPlaneGenerationState: controlPlaneGenerationState{
+			dialMode: consts.DialMode_Ip,
+		},
+	}
+	routingResult := &bpfRoutingResult{Outbound: uint8(consts.OutboundDirect), NeedSniff: 1}
+	if !cp.shouldTryTcpSniff(mustParseTcpSniffAddrPort(t, "198.51.100.20:22"), routingResult) {
+		t.Fatal("ambiguous routing should override dial-mode and excluded-port sniff suppression")
+	}
+	cp.sniffingTimeout = 0
+	if cp.shouldTryTcpSniff(mustParseTcpSniffAddrPort(t, "198.51.100.20:443"), routingResult) {
+		t.Fatal("zero sniffing timeout should remain an explicit hard disable")
+	}
+}
+
+func TestShouldSkipTcpSniffDoesNotSuppressAmbiguousRouting(t *testing.T) {
+	now := time.Now()
+	cp := &ControlPlane{tcpSniffNegSet: make(map[tcpSniffNegKey]tcpSniffNegEntry)}
+	key := newTcpSniffNegKey(mustParseTcpSniffAddrPort(t, "198.51.100.20:443"), nil)
+	for range tcpSniffFailureThreshold {
+		cp.noteTcpSniffFailure(key, now)
+	}
+	if !cp.shouldSkipTcpSniff(&bpfRoutingResult{}, key, now) {
+		t.Fatal("ordinary sniffing should honor the negative cache")
+	}
+	if cp.shouldSkipTcpSniff(&bpfRoutingResult{NeedSniff: 1}, key, now) {
+		t.Fatal("ambiguous routing must not be suppressed by the negative cache")
+	}
+}
+
+func TestDomainRoutingDecisionAccumulatesMustDirect(t *testing.T) {
+	rules := []*config_parser.RoutingRule{
+		{
+			AndFunctions: []*config_parser.Function{{
+				Name: consts.Function_Domain,
+				Params: []*config_parser.Param{{
+					Key: string(consts.RoutingDomainKey_Suffix),
+					Val: "must.test",
+				}},
+			}},
+			Outbound: config_parser.Function{Name: consts.OutboundMustRules.String()},
+		},
+		{
+			AndFunctions: []*config_parser.Function{{
+				Name: consts.Function_Domain,
+				Params: []*config_parser.Param{{
+					Key: string(consts.RoutingDomainKey_Suffix),
+					Val: "test",
+				}},
+			}},
+			Outbound: config_parser.Function{Name: "proxy"},
+		},
+	}
+	builder, err := NewRoutingMatcherBuilder(
+		logrus.New(),
+		rules,
+		map[string]uint8{
+			consts.OutboundDirect.String(): uint8(consts.OutboundDirect),
+			"proxy":                        uint8(consts.OutboundUserDefinedMin),
+		},
+		nil,
+		config.FunctionOrString(consts.OutboundDirect.String()),
+	)
+	if err != nil {
+		t.Fatalf("NewRoutingMatcherBuilder: %v", err)
+	}
+	matcher, err := builder.BuildUserspace()
+	if err != nil {
+		t.Fatalf("BuildUserspace: %v", err)
+	}
+
+	_, mustDecision := matcher.DomainRoutingDecision("www.must.test")
+	if !mustDecision.Valid || !mustDecision.Must || mustDecision.Outbound != uint8(consts.OutboundUserDefinedMin) {
+		t.Fatalf("must-domain decision = %+v, want valid proxy decision with Must", mustDecision)
+	}
+	_, plainDecision := matcher.DomainRoutingDecision("www.plain.test")
+	if !plainDecision.Valid || plainDecision.Must {
+		t.Fatalf("plain-domain decision = %+v, want valid decision without Must", plainDecision)
+	}
+}
+
+func TestRerouteTcpBySniffedDomainUsesExactDomainDecision(t *testing.T) {
+	rules := []*config_parser.RoutingRule{
+		{
+			AndFunctions: []*config_parser.Function{{
+				Name: consts.Function_Domain,
+				Params: []*config_parser.Param{{
+					Key: string(consts.RoutingDomainKey_Suffix),
+					Val: "direct.test",
+				}},
+			}},
+			Outbound: config_parser.Function{Name: consts.OutboundDirect.String()},
+		},
+		{
+			AndFunctions: []*config_parser.Function{{
+				Name: consts.Function_Domain,
+				Params: []*config_parser.Param{{
+					Key: string(consts.RoutingDomainKey_Suffix),
+					Val: "proxy.test",
+				}},
+			}},
+			Outbound: config_parser.Function{Name: "proxy"},
+		},
+	}
+	builder, err := NewRoutingMatcherBuilder(
+		logrus.New(),
+		rules,
+		map[string]uint8{
+			consts.OutboundDirect.String(): uint8(consts.OutboundDirect),
+			"proxy":                        uint8(consts.OutboundUserDefinedMin),
+		},
+		nil,
+		config.FunctionOrString(consts.OutboundDirect.String()),
+	)
+	if err != nil {
+		t.Fatalf("NewRoutingMatcherBuilder: %v", err)
+	}
+	matcher, err := builder.BuildUserspace()
+	if err != nil {
+		t.Fatalf("BuildUserspace: %v", err)
+	}
+	cp := &ControlPlane{controlPlaneGenerationState: controlPlaneGenerationState{routingMatcher: matcher}}
+	routingResult := &bpfRoutingResult{
+		Outbound:  uint8(consts.OutboundDirect),
+		Drop:      1,
+		NeedSniff: 1,
+	}
+
+	err = cp.rerouteTcpBySniffedDomain(
+		mustParseTcpSniffAddrPort(t, "192.0.2.10:12345"),
+		mustParseTcpSniffAddrPort(t, "198.51.100.20:443"),
+		"www.proxy.test",
+		routingResult,
+	)
+	if err != nil {
+		t.Fatalf("rerouteTcpBySniffedDomain: %v", err)
+	}
+	if got := consts.OutboundIndex(routingResult.Outbound); got != consts.OutboundUserDefinedMin {
+		t.Fatalf("rerouted outbound = %v, want %v", got, consts.OutboundUserDefinedMin)
+	}
+	if routingResult.NeedSniff != 0 {
+		t.Fatal("reroute should clear NeedSniff")
+	}
+	if routingResult.Drop != 0 {
+		t.Fatal("reroute should replace the ambiguous drop decision")
+	}
+}
+
+func TestRerouteUdpBySniffedDomainUsesExactDomainDecision(t *testing.T) {
+	rules := []*config_parser.RoutingRule{
+		{
+			AndFunctions: []*config_parser.Function{
+				{
+					Name: consts.Function_L4Proto,
+					Params: []*config_parser.Param{{
+						Val: "udp",
+					}},
+				},
+				{
+					Name: consts.Function_Domain,
+					Params: []*config_parser.Param{{
+						Key: string(consts.RoutingDomainKey_Suffix),
+						Val: "proxy.test",
+					}},
+				},
+			},
+			Outbound: config_parser.Function{Name: "proxy"},
+		},
+	}
+	builder, err := NewRoutingMatcherBuilder(
+		logrus.New(),
+		rules,
+		map[string]uint8{
+			consts.OutboundDirect.String(): uint8(consts.OutboundDirect),
+			"proxy":                        uint8(consts.OutboundUserDefinedMin),
+		},
+		nil,
+		config.FunctionOrString(consts.OutboundDirect.String()),
+	)
+	if err != nil {
+		t.Fatalf("NewRoutingMatcherBuilder: %v", err)
+	}
+	matcher, err := builder.BuildUserspace()
+	if err != nil {
+		t.Fatalf("BuildUserspace: %v", err)
+	}
+	cp := &ControlPlane{controlPlaneGenerationState: controlPlaneGenerationState{routingMatcher: matcher}}
+	routingResult := &bpfRoutingResult{
+		Outbound:  uint8(consts.OutboundDirect),
+		Drop:      1,
+		NeedSniff: 1,
+	}
+
+	err = cp.rerouteUdpBySniffedDomain(
+		mustParseTcpSniffAddrPort(t, "192.0.2.10:12345"),
+		mustParseTcpSniffAddrPort(t, "198.51.100.20:443"),
+		"www.proxy.test",
+		routingResult,
+	)
+	if err != nil {
+		t.Fatalf("rerouteUdpBySniffedDomain: %v", err)
+	}
+	if got := consts.OutboundIndex(routingResult.Outbound); got != consts.OutboundUserDefinedMin {
+		t.Fatalf("rerouted outbound = %v, want %v", got, consts.OutboundUserDefinedMin)
+	}
+	if routingResult.NeedSniff != 0 {
+		t.Fatal("reroute should clear NeedSniff")
+	}
+	if routingResult.Drop != 0 {
+		t.Fatal("reroute should replace the ambiguous drop decision")
+	}
 }
 
 func TestNoteTcpSniffFailure_AssignsExpiry(t *testing.T) {

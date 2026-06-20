@@ -114,6 +114,7 @@ func (c *controlPlaneCore) retrieveEmbeddedRoutingResult(tuples *bpfTuplesKey, l
 			connState.Meta.Data.Dscp,
 			connState.Pname,
 			connState.Pid,
+			connState.Meta.Data.HasRouting&routingMetaFlagNeedSniff,
 		)
 	case unix.IPPROTO_UDP:
 		if bpf.ConnStateMap == nil {
@@ -138,6 +139,7 @@ func (c *controlPlaneCore) retrieveEmbeddedRoutingResult(tuples *bpfTuplesKey, l
 			connState.Meta.Data.Dscp,
 			connState.Pname,
 			connState.Pid,
+			connState.Meta.Data.HasRouting&routingMetaFlagNeedSniff,
 		)
 	default:
 		return nil, ebpf.ErrKeyNotExist
@@ -146,9 +148,48 @@ func (c *controlPlaneCore) retrieveEmbeddedRoutingResult(tuples *bpfTuplesKey, l
 	return &routingResult, nil
 }
 
-const routingMetaFlagDrop uint8 = 1 << 1
+func (c *controlPlaneCore) updateUdpConnStateRouting(src, dst netip.AddrPort, result *bpfRoutingResult) error {
+	if c == nil || result == nil {
+		return ebpf.ErrKeyNotExist
+	}
+	bpf := c.bpf.Load()
+	if bpf == nil || bpf.ConnStateMap == nil {
+		return ebpf.ErrKeyNotExist
+	}
 
-func routingResultFromConnState(mark uint32, must uint8, outbound uint8, drop uint8, mac [6]uint8, dscp uint8, pname [16]uint8, pid uint32) bpfRoutingResult {
+	tuples := bpfTuplesKeyFromAddrPorts(src, dst, unix.IPPROTO_UDP)
+	var connState bpfConnState
+	if err := bpf.ConnStateMap.Lookup(&tuples, &connState); err != nil {
+		return fmt.Errorf("reading UDP conn-state for routing update: %w", err)
+	}
+
+	connState.Meta.Data.Mark = result.Mark
+	connState.Meta.Data.Must = result.Must
+	connState.Meta.Data.Outbound = result.Outbound
+	connState.Meta.Data.Dscp = result.Dscp
+	connState.Meta.Data.HasRouting = 1
+	if result.Drop != 0 {
+		connState.Meta.Data.HasRouting |= routingMetaFlagDrop
+	}
+	if result.NeedSniff != 0 {
+		connState.Meta.Data.HasRouting |= routingMetaFlagNeedSniff
+	}
+	connState.Mac = result.Mac
+	connState.Pname = result.Pname
+	connState.Pid = result.Pid
+
+	if err := bpf.ConnStateMap.Update(&tuples, &connState, ebpf.UpdateExist); err != nil {
+		return fmt.Errorf("updating UDP conn-state routing: %w", err)
+	}
+	return nil
+}
+
+const (
+	routingMetaFlagDrop      uint8 = 1 << 1
+	routingMetaFlagNeedSniff uint8 = 1 << 2
+)
+
+func routingResultFromConnState(mark uint32, must uint8, outbound uint8, drop uint8, mac [6]uint8, dscp uint8, pname [16]uint8, pid uint32, needSniff uint8) bpfRoutingResult {
 	var routingResult bpfRoutingResult
 	routingResult.Mark = mark
 	routingResult.Must = must
@@ -160,6 +201,9 @@ func routingResultFromConnState(mark uint32, must uint8, outbound uint8, drop ui
 	routingResult.Dscp = dscp
 	routingResult.Pname = pname
 	routingResult.Pid = pid
+	if needSniff != 0 {
+		routingResult.NeedSniff = 1
+	}
 	return routingResult
 }
 
@@ -201,6 +245,7 @@ func (c *controlPlaneCore) retrieveRoutingHandoffResult(tuples *bpfTuplesKey) (*
 		entry.Result.Dscp,
 		entry.Result.Pname,
 		entry.Result.Pid,
+		entry.Result.NeedSniff,
 	)
 	return &routingResult, nil
 }

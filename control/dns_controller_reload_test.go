@@ -242,7 +242,7 @@ func TestDnsController_CloneAndRestoreReloadCache(t *testing.T) {
 		matchCalls.Add(1)
 		require.Equal(t, "reload.example.", fqdn)
 		return []uint32{9, 7}
-	}, now)
+	}, nil, now)
 	require.Equal(t, 1, count)
 	require.EqualValues(t, 1, matchCalls.Load())
 
