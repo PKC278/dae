@@ -283,7 +283,7 @@ func (c *DnsController) CloneCacheForReload() map[string]*DnsCache {
 	return result
 }
 
-func (c *DnsController) RestoreReloadCache(entries map[string]*DnsCache, matchDomainBitmap func(string) []uint32, now time.Time) int {
+func (c *DnsController) RestoreReloadCache(entries map[string]*DnsCache, matchDomainBitmap func(string) []uint32, matchDomainRoutingDecision func(string) domainRoutingDecision, now time.Time) int {
 	if c == nil || len(entries) == 0 {
 		return 0
 	}
@@ -295,6 +295,9 @@ func (c *DnsController) RestoreReloadCache(entries map[string]*DnsCache, matchDo
 		}
 		if matchDomainBitmap != nil {
 			v.DomainBitmap = matchDomainBitmap(v.GetFqdn())
+		}
+		if matchDomainRoutingDecision != nil {
+			v.DomainRoutingDecision = matchDomainRoutingDecision(v.GetFqdn())
 		}
 		c.dnsCache.Store(k, v)
 		c.rememberDnsKnowledge(dnsCacheBaseKey(k), v.OriginalDeadline)

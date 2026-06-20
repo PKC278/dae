@@ -14,19 +14,34 @@ import (
 )
 
 type domainRoutingOwnerSnapshot struct {
-	bitmap bpfDomainRouting
-	ips    map[[4]uint32]struct{}
+	bitmap   bpfDomainRouting
+	decision domainRoutingDecision
+	ips      map[[4]uint32]struct{}
+}
+
+type domainRoutingDecision struct {
+	Valid    bool
+	Outbound uint8
+	Mark     uint32
+	Must     bool
+	Drop     bool
+}
+
+type domainRoutingOwnerRoute struct {
+	bitmap   bpfDomainRouting
+	decision domainRoutingDecision
 }
 
 type domainRoutingIPState struct {
-	owners map[string]bpfDomainRouting
+	owners map[string]domainRoutingOwnerRoute
 	merged bpfDomainRouting
 }
 
 type domainRoutingTracker struct {
-	mu     sync.Mutex
-	owners map[string]domainRoutingOwnerSnapshot
-	ips    map[[4]uint32]*domainRoutingIPState
+	mu                       sync.Mutex
+	owners                   map[string]domainRoutingOwnerSnapshot
+	ips                      map[[4]uint32]*domainRoutingIPState
+	decisionFromMergedBitmap func([]uint32) domainRoutingDecision
 }
 
 func newDomainRoutingTracker() *domainRoutingTracker {
@@ -34,6 +49,15 @@ func newDomainRoutingTracker() *domainRoutingTracker {
 		owners: make(map[string]domainRoutingOwnerSnapshot),
 		ips:    make(map[[4]uint32]*domainRoutingIPState),
 	}
+}
+
+func (t *domainRoutingTracker) setDecisionFromMergedBitmap(fn func([]uint32) domainRoutingDecision) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.decisionFromMergedBitmap = fn
+	t.mu.Unlock()
 }
 
 func cloneDomainRoutingIPSet(src map[[4]uint32]struct{}) map[[4]uint32]struct{} {
@@ -62,12 +86,64 @@ func orDomainRoutingBitmap(dst *bpfDomainRouting, src bpfDomainRouting) {
 	}
 }
 
-func mergeDomainRoutingOwnerBitmaps(owners map[string]bpfDomainRouting) bpfDomainRouting {
+func (t *domainRoutingTracker) mergeDomainRoutingOwnerBitmaps(owners map[string]domainRoutingOwnerRoute) bpfDomainRouting {
 	var merged bpfDomainRouting
-	for _, bitmap := range owners {
-		orDomainRoutingBitmap(&merged, bitmap)
+	for _, owner := range owners {
+		orDomainRoutingBitmap(&merged, owner.bitmap)
+	}
+	if t.domainRoutingOwnersAmbiguous(owners, merged.Bitmap[:]) {
+		merged.Ambiguous = 1
 	}
 	return merged
+}
+
+func equalDomainRoutingBitmap(a, b bpfDomainRouting) bool {
+	return a.Bitmap == b.Bitmap
+}
+
+func equalDomainRoutingDecision(a, b domainRoutingDecision) bool {
+	return a.Valid == b.Valid &&
+		a.Outbound == b.Outbound &&
+		a.Mark == b.Mark &&
+		a.Must == b.Must &&
+		a.Drop == b.Drop
+}
+
+func (t *domainRoutingTracker) domainRoutingOwnersAmbiguous(owners map[string]domainRoutingOwnerRoute, mergedBitmap []uint32) bool {
+	var first bpfDomainRouting
+	var firstDecision domainRoutingDecision
+	haveFirst := false
+	allDecisionsValidAndEqual := true
+	hasDifferentBitmap := false
+	for _, owner := range owners {
+		if !haveFirst {
+			first = owner.bitmap
+			firstDecision = owner.decision
+			allDecisionsValidAndEqual = firstDecision.Valid
+			haveFirst = true
+			continue
+		}
+		if !equalDomainRoutingBitmap(first, owner.bitmap) {
+			hasDifferentBitmap = true
+			if !owner.decision.Valid ||
+				!equalDomainRoutingDecision(firstDecision, owner.decision) {
+				allDecisionsValidAndEqual = false
+			}
+		}
+	}
+	if !haveFirst || !hasDifferentBitmap {
+		return false
+	}
+	if !allDecisionsValidAndEqual || t.decisionFromMergedBitmap == nil {
+		return true
+	}
+
+	// OR-ing domain bitmaps can synthesize a rule match that none of the
+	// individual domains produced, for example domain(A) && domain(B). Keep the
+	// kernel fast path only when the merged bitmap still resolves to the exact
+	// same routing decision as every owner.
+	mergedDecision := t.decisionFromMergedBitmap(mergedBitmap)
+	return !mergedDecision.Valid || !equalDomainRoutingDecision(firstDecision, mergedDecision)
 }
 
 func buildDomainRoutingOwnerSnapshot(cache *DnsCache) (domainRoutingOwnerSnapshot, error) {
@@ -79,6 +155,7 @@ func buildDomainRoutingOwnerSnapshot(cache *DnsCache) (domainRoutingOwnerSnapsho
 	}
 	var snapshot domainRoutingOwnerSnapshot
 	copy(snapshot.bitmap.Bitmap[:], cache.DomainBitmap)
+	snapshot.decision = cache.DomainRoutingDecision
 	ips := extractIPsFromDnsCache(cache)
 	if len(ips) == 0 {
 		return snapshot, nil
@@ -96,22 +173,28 @@ func (t *domainRoutingTracker) desiredBitmapForKeyLocked(
 	ownerKey string,
 	snapshot domainRoutingOwnerSnapshot,
 ) (bitmap bpfDomainRouting, present bool) {
+	owners := make(map[string]domainRoutingOwnerRoute)
 	if state := t.ips[key]; state != nil {
 		for existingOwnerKey, existingBitmap := range state.owners {
 			if existingOwnerKey == ownerKey {
 				continue
 			}
-			orDomainRoutingBitmap(&bitmap, existingBitmap)
-			present = true
+			owners[existingOwnerKey] = existingBitmap
 		}
 	}
-	if len(snapshot.ips) > 0 && !isZeroDomainRoutingBitmap(snapshot.bitmap) {
+	if len(snapshot.ips) > 0 {
 		if _, ok := snapshot.ips[key]; ok {
-			orDomainRoutingBitmap(&bitmap, snapshot.bitmap)
-			present = true
+			owners[ownerKey] = domainRoutingOwnerRoute{
+				bitmap:   snapshot.bitmap,
+				decision: snapshot.decision,
+			}
 		}
 	}
-	return bitmap, present
+	if len(owners) == 0 {
+		return bitmap, false
+	}
+	bitmap = t.mergeDomainRoutingOwnerBitmaps(owners)
+	return bitmap, !isZeroDomainRoutingBitmap(bitmap)
 }
 
 func (t *domainRoutingTracker) applyOwnerSnapshotLocked(ownerKey string, snapshot domainRoutingOwnerSnapshot) {
@@ -129,28 +212,32 @@ func (t *domainRoutingTracker) applyOwnerSnapshotLocked(ownerKey string, snapsho
 				delete(t.ips, key)
 				continue
 			}
-			state.merged = mergeDomainRoutingOwnerBitmaps(state.owners)
+			state.merged = t.mergeDomainRoutingOwnerBitmaps(state.owners)
 		}
 		delete(t.owners, ownerKey)
 	}
-	if len(snapshot.ips) == 0 || isZeroDomainRoutingBitmap(snapshot.bitmap) {
+	if len(snapshot.ips) == 0 {
 		return
 	}
 	cloned := domainRoutingOwnerSnapshot{
-		bitmap: snapshot.bitmap,
-		ips:    cloneDomainRoutingIPSet(snapshot.ips),
+		bitmap:   snapshot.bitmap,
+		decision: snapshot.decision,
+		ips:      cloneDomainRoutingIPSet(snapshot.ips),
 	}
 	t.owners[ownerKey] = cloned
 	for key := range cloned.ips {
 		state := t.ips[key]
 		if state == nil {
 			state = &domainRoutingIPState{
-				owners: make(map[string]bpfDomainRouting),
+				owners: make(map[string]domainRoutingOwnerRoute),
 			}
 			t.ips[key] = state
 		}
-		state.owners[ownerKey] = cloned.bitmap
-		state.merged = mergeDomainRoutingOwnerBitmaps(state.owners)
+		state.owners[ownerKey] = domainRoutingOwnerRoute{
+			bitmap:   cloned.bitmap,
+			decision: cloned.decision,
+		}
+		state.merged = t.mergeDomainRoutingOwnerBitmaps(state.owners)
 	}
 }
 
@@ -184,7 +271,7 @@ func (t *domainRoutingTracker) syncOwner(
 		current := t.ips[key]
 		switch {
 		case !present:
-			if current != nil {
+			if current != nil && !isZeroDomainRoutingBitmap(current.merged) {
 				keysToDelete = append(keysToDelete, key)
 			}
 		case current == nil || current.merged != desiredBitmap:

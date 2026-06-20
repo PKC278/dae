@@ -144,6 +144,41 @@ func retrieveRoutingHandoffResultForMetadataRuleTest(t *testing.T, l4proto uint8
 	return rr, src, dst
 }
 
+func TestUpdateUdpConnStateRoutingPersistsExactDomainDecision(t *testing.T) {
+	udpMap := newJanitorTestMap(t, "conn_state_map")
+	src := common.ConvergeAddrPort(netip.MustParseAddrPort("192.0.2.10:12345"))
+	dst := common.ConvergeAddrPort(netip.MustParseAddrPort("198.51.100.20:443"))
+	key := tuplesKeyFromAddrPorts(src, dst, unix.IPPROTO_UDP)
+	state := bpfConnState{LastSeenNs: 1}
+	state.Meta.Data.Outbound = uint8(consts.OutboundDirect)
+	state.Meta.Data.HasRouting = 1 | routingMetaFlagDrop | routingMetaFlagNeedSniff
+	if err := udpMap.Update(key, &state, ebpf.UpdateAny); err != nil {
+		t.Fatalf("update initial UDP conn-state: %v", err)
+	}
+	core := &controlPlaneCore{}
+	core.bpf.Store(&bpfObjects{bpfMaps: bpfMaps{ConnStateMap: udpMap}})
+	exact := &bpfRoutingResult{
+		Outbound: uint8(consts.OutboundUserDefinedMin),
+		Mark:     123,
+		Must:     1,
+		Dscp:     46,
+	}
+	if err := core.updateUdpConnStateRouting(src, dst, exact); err != nil {
+		t.Fatalf("updateUdpConnStateRouting: %v", err)
+	}
+
+	got, err := core.RetrieveRoutingResult(src, dst, unix.IPPROTO_UDP)
+	if err != nil {
+		t.Fatalf("RetrieveRoutingResult: %v", err)
+	}
+	if got.Outbound != exact.Outbound || got.Mark != exact.Mark || got.Must != exact.Must || got.Dscp != exact.Dscp {
+		t.Fatalf("persisted routing result = %+v, want %+v", got, exact)
+	}
+	if got.Drop != 0 || got.NeedSniff != 0 {
+		t.Fatalf("persisted routing flags = drop %d needSniff %d, want both cleared", got.Drop, got.NeedSniff)
+	}
+}
+
 func TestRetrievedRoutingResultStillMatchesMetadataSensitiveRules(t *testing.T) {
 	matchMac, err := common.ParseMac("02:42:ac:11:00:02")
 	if err != nil {

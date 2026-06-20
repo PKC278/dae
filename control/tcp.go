@@ -107,6 +107,30 @@ func retryRetrieveRoutingResult(ctx context.Context, retrieve func() (*bpfRoutin
 	return nil, lastErr
 }
 
+func (c *ControlPlane) rerouteTcpBySniffedDomain(src, dst netip.AddrPort, domain string, routingResult *bpfRoutingResult) error {
+	if domain == "" || routingResult == nil {
+		return nil
+	}
+	outbound, mark, must, drop, err := c.Route(src, dst, domain, consts.L4ProtoType_TCP, routingResult)
+	if err != nil {
+		return err
+	}
+	routingResult.Outbound = uint8(outbound)
+	routingResult.Mark = mark
+	if must {
+		routingResult.Must = 1
+	} else {
+		routingResult.Must = 0
+	}
+	if drop {
+		routingResult.Drop = 1
+	} else {
+		routingResult.Drop = 0
+	}
+	routingResult.NeedSniff = 0
+	return nil
+}
+
 func (c *ControlPlane) handleConn(ctx context.Context, lConn net.Conn) (err error) {
 	defer func() { _ = lConn.Close() }()
 
@@ -157,10 +181,11 @@ func (c *ControlPlane) handleConn(ctx context.Context, lConn net.Conn) (err erro
 		domain     string
 		lRelayConn netproxy.Conn = lConn
 	)
-	if c.shouldTryTcpSniff(dst, routingResult) {
+	shouldSniff := c.shouldTryTcpSniff(dst, routingResult)
+	if shouldSniff {
 		cacheKey := newTcpSniffNegKey(dst, routingResult)
 		now := time.Now()
-		if c.shouldSkipTcpSniffByNegativeCache(cacheKey, now) {
+		if c.shouldSkipTcpSniff(routingResult, cacheKey, now) {
 			if c.log.IsLevelEnabled(logrus.TraceLevel) {
 				c.log.WithFields(logrus.Fields{
 					"src": src.String(),
@@ -212,9 +237,17 @@ func (c *ControlPlane) handleConn(ctx context.Context, lConn net.Conn) (err erro
 				} else {
 					// Any success means this flow signature is sniffable; clear suppression.
 					c.clearTcpSniffNegative(cacheKey)
+					if err = c.rerouteTcpBySniffedDomain(src, dst, domain, routingResult); err != nil {
+						return err
+					}
 				}
 			}
 		}
+	}
+	if routingResult.NeedSniff != 0 {
+		// Preserve dae's availability-first behavior: if the domain cannot be
+		// recovered, relay with the original IP-level routing decision.
+		routingResult.NeedSniff = 0
 	}
 
 	dialParam := &proxyDialParam{
