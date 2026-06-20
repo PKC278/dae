@@ -321,6 +321,7 @@ type ruleProviderUpdateLoop struct {
 
 type ruleProviderUpdateSchedule struct {
 	delay         time.Duration
+	retryDelay    time.Duration
 	forceDownload bool
 }
 
@@ -376,9 +377,9 @@ func ruleProviderUpdateScheduleForDir(conf *config.Config, ruleProviderDir strin
 		remaining := info.ModTime().Add(interval).Sub(now)
 		if remaining <= 0 {
 			if allowImmediate {
-				return ruleProviderUpdateSchedule{delay: time.Nanosecond, forceDownload: true}
+				return ruleProviderUpdateSchedule{delay: time.Nanosecond, retryDelay: interval, forceDownload: true}
 			}
-			return ruleProviderUpdateSchedule{delay: interval, forceDownload: true}
+			return ruleProviderUpdateSchedule{delay: interval, retryDelay: interval, forceDownload: true}
 		}
 		if remaining < delay {
 			delay = remaining
@@ -386,11 +387,11 @@ func ruleProviderUpdateScheduleForDir(conf *config.Config, ruleProviderDir strin
 	}
 	if missing {
 		if allowImmediate {
-			return ruleProviderUpdateSchedule{delay: time.Nanosecond}
+			return ruleProviderUpdateSchedule{delay: time.Nanosecond, retryDelay: interval}
 		}
-		return ruleProviderUpdateSchedule{delay: interval}
+		return ruleProviderUpdateSchedule{delay: interval, retryDelay: interval}
 	}
-	return ruleProviderUpdateSchedule{delay: delay, forceDownload: true}
+	return ruleProviderUpdateSchedule{delay: delay, retryDelay: interval, forceDownload: true}
 }
 
 func ruleProviderForceRefreshDue(conf *config.Config, ruleProviderDir string, now time.Time) bool {
@@ -472,7 +473,14 @@ func startRuleProviderUpdateLoop(log *logrus.Logger, reloadManager *reloadManage
 						requestedAtMono:           monotonicNowNano(),
 					})
 				}
-				schedule = ruleProviderUpdateSchedule{}
+				// Keep a periodic retry armed even when this request is rejected or
+				// the queued reload later fails. A successful reload may replace this
+				// schedule with one recalculated from the refreshed file timestamps.
+				if schedule.retryDelay > 0 {
+					schedule.delay = schedule.retryDelay
+				} else {
+					schedule = ruleProviderUpdateSchedule{}
+				}
 				resetTimer()
 			}
 		}

@@ -242,3 +242,43 @@ func TestMatchRulesContinuesAfterPartialHitUntilFullHit(t *testing.T) {
 		t.Fatalf("unexpected second hit: %#v", report.Hits[1])
 	}
 }
+
+func TestMatchRulesUsesRuntimeScalarSemantics(t *testing.T) {
+	tests := []struct {
+		name        string
+		scope       string
+		function    string
+		ruleValue   string
+		targetValue string
+		wantMatch   bool
+	}{
+		{name: "pname_is_case_sensitive", scope: "routing", function: "pname", ruleValue: "curl", targetValue: "CURL", wantMatch: false},
+		{name: "pname_uses_task_comm_length", scope: "routing", function: "pname", ruleValue: "abcdefghijklmnopX", targetValue: "abcdefghijklmnopY", wantMatch: true},
+		{name: "dscp_compares_numeric_value", scope: "routing", function: "dscp", ruleValue: "0x4", targetValue: "4", wantMatch: true},
+		{name: "qtype_name_matches_number", scope: "dns_request", function: "qtype", ruleValue: "HTTPS", targetValue: "65", wantMatch: true},
+		{name: "upstream_is_case_sensitive", scope: "dns_response", function: "upstream", ruleValue: "GoogleDNS", targetValue: "googledns", wantMatch: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rules := []*config_parser.RoutingRule{{
+				AndFunctions: []*config_parser.Function{{
+					Name:   tt.function,
+					Params: []*config_parser.Param{{Val: tt.ruleValue}},
+				}},
+				Outbound: config_parser.Function{Name: "direct"},
+			}}
+			report, err := MatchRules(rules, "proxy", MatchInput{
+				Raw:      tt.function + ":" + tt.targetValue,
+				Scope:    tt.scope,
+				Function: &config_parser.Function{Name: tt.function, Params: []*config_parser.Param{{Val: tt.targetValue}}},
+			}, MatchOption{Logger: logrus.New()})
+			if err != nil {
+				t.Fatalf("MatchRules failed: %v", err)
+			}
+			if got := report.Hit != nil; got != tt.wantMatch {
+				t.Fatalf("matched = %v, want %v", got, tt.wantMatch)
+			}
+		})
+	}
+}
