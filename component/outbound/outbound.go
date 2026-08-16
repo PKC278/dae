@@ -24,10 +24,13 @@ import (
 	_ "github.com/daeuniverse/outbound/protocol/shadowsocks_2022"
 	_ "github.com/daeuniverse/outbound/protocol/trojanc"
 	_ "github.com/daeuniverse/outbound/protocol/tuic"
-	_ "github.com/daeuniverse/outbound/protocol/vless"
 	_ "github.com/daeuniverse/outbound/protocol/vmess"
 	_ "github.com/daeuniverse/outbound/transport/shadowtls"
 	_ "github.com/daeuniverse/outbound/transport/simpleobfs"
 	_ "github.com/daeuniverse/outbound/transport/tls"
 	_ "github.com/daeuniverse/outbound/transport/ws"
+
+	// Replaces outbound's "vless" link handler with dae's mihomo-backed one.
+	// outbound's protocol/vless is left unimported: nothing reaches it any more.
+	_ "github.com/daeuniverse/dae/component/outbound/vless"
 )
