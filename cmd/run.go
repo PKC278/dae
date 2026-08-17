@@ -305,6 +305,9 @@ var (
 
 			log.Infof("Include config files: [%v]", strings.Join(includes, ", "))
 			if err := Run(log, conf, []string{filepath.Dir(cfgFile)}); err != nil {
+				// Report before dying so `dae wait` fails fast instead of
+				// polling until its timeout.
+				_ = setRunSignalProgress(consts.ReloadError, err.Error())
 				log.Fatalln(err)
 			}
 		},
@@ -517,6 +520,10 @@ func (r *Runner) Run() (err error) {
 	// Remove AbortFile at beginning.
 	_ = os.Remove(AbortFile)
 	_ = os.Remove(ForceRuleProviderFile)
+	// Claim the progress file straight away. Until readiness it would otherwise
+	// still hold the previous run's result, which a waiter would read as this
+	// startup having already finished.
+	_ = setRunSignalProgress(consts.ReloadProcessing, "Starting dae...")
 
 	// New ControlPlane.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -550,10 +557,14 @@ func (r *Runner) Run() (err error) {
 				if !disablePidFile {
 					_ = os.WriteFile(PidFilePath, []byte(strconv.Itoa(os.Getpid())), 0644)
 				}
-				_ = setRunSignalProgress(consts.ReloadDone, "")
-				logger.Milestone(log, "dae is now proxying traffic (tproxy port %v, ready in %v)",
-					conf.Global.TproxyPort, time.Since(runStart).Round(time.Millisecond))
+				// The same sentence goes to the log and to the progress file, so
+				// `dae wait` can report it to whoever started the service.
+				ready := fmt.Sprintf("dae is now proxying traffic (ready in %v)",
+					time.Since(runStart).Round(time.Millisecond))
+				_ = setRunSignalProgress(consts.ReloadDone, ready)
+				logger.Milestone(log, "%s", ready)
 			} else {
+				_ = setRunSignalProgress(consts.ReloadError, "dae failed to start; see the log for details")
 				log.Errorln("Initialization failed; not signaling readiness to supervisor")
 			}
 		}()
