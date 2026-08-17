@@ -254,6 +254,10 @@ type DownloadRuleProviderOptions struct {
 	HTTPClientResolver RuleProviderHTTPClientResolver
 	Force              bool
 	IgnoreErrors       bool
+	// OnIgnoredError, when set, is called for every error IgnoreErrors
+	// discards. Without it a failed refresh is indistinguishable from a
+	// successful one and dae would silently run on stale rule sets.
+	OnIgnoredError func(name string, err error)
 }
 
 func DownloadRuleProviders(ruleProviders map[string]string, dir string) error {
@@ -297,6 +301,13 @@ func DownloadRuleProvidersWithOptions(ruleProviders map[string]string, opt Downl
 	wg.Wait()
 
 	if opt.IgnoreErrors {
+		if opt.OnIgnoredError != nil {
+			for idx, err := range errs {
+				if err != nil {
+					opt.OnIgnoredError(names[idx], err)
+				}
+			}
+		}
 		return nil
 	}
 	for _, err := range errs {
