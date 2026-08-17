@@ -118,11 +118,12 @@ type ControlPlane struct {
 }
 
 type controlPlaneBuildOptions struct {
-	delayDatapathCommit       bool
-	delayDNSListenerStart     bool
-	forceRuleProviderDownload bool
-	ignoreRuleProviderErrors  bool
-	ruleProviderDNSRouter     *daedns.Router
+	delayDatapathCommit           bool
+	delayDNSListenerStart         bool
+	forceRuleProviderDownload     bool
+	ignoreRuleProviderErrors      bool
+	bestEffortRuleProviderRefresh bool
+	ruleProviderDNSRouter         *daedns.Router
 }
 
 type ControlPlaneBuildOption interface {
@@ -144,6 +145,17 @@ func WithForceRuleProviderDownload(force bool) ControlPlaneBuildOption {
 func WithIgnoreRuleProviderErrors(ignore bool) ControlPlaneBuildOption {
 	return controlPlaneBuildOptionFunc(func(opts *controlPlaneBuildOptions) {
 		opts.ignoreRuleProviderErrors = ignore
+	})
+}
+
+// WithBestEffortRuleProviderRefresh lets a forced refresh fail without failing
+// the build, keeping the rule sets already on disk. Unlike
+// WithIgnoreRuleProviderErrors it does not allow a rule set to be missing: it
+// only covers a refresh of copies that are already cached, so routing is built
+// from complete, if slightly stale, data.
+func WithBestEffortRuleProviderRefresh(bestEffort bool) ControlPlaneBuildOption {
+	return controlPlaneBuildOptionFunc(func(opts *controlPlaneBuildOptions) {
+		opts.bestEffortRuleProviderRefresh = bestEffort
 	})
 }
 
@@ -590,15 +602,25 @@ func newControlPlaneWithContextOptions(
 		return nil, fmt.Errorf("rule_provider: %w", err)
 	}
 	option := dialer.NewGlobalOption(global, log)
-	option.DaeDNS, err = daedns.NewWithOption(log, global, dnsConfig, &daedns.NewOption{
-		LocationFinder:               locationFinder,
-		RuleProviders:                ruleProviderMap,
-		RuleProviderDir:              ruleProviderDir,
-		RuleProviderDownloadDisabled: true,
-		SkipUnavailableRuleProviders: true,
-	})
-	if err != nil {
-		return nil, err
+	// The caller normally builds this router already, from the same config and
+	// the same rule providers, to resolve subscription and rule provider hosts.
+	// Reuse it rather than compiling an identical DNS routing program again:
+	// the build is dominated by domain matcher construction and costs seconds
+	// on router-class hardware. The Router is immutable once constructed apart
+	// from its internally synchronized lookup cache, so sharing it is safe.
+	if buildOpts.ruleProviderDNSRouter != nil {
+		option.DaeDNS = buildOpts.ruleProviderDNSRouter
+	} else {
+		option.DaeDNS, err = daedns.NewWithOption(log, global, dnsConfig, &daedns.NewOption{
+			LocationFinder:               locationFinder,
+			RuleProviders:                ruleProviderMap,
+			RuleProviderDir:              ruleProviderDir,
+			RuleProviderDownloadDisabled: true,
+			SkipUnavailableRuleProviders: true,
+		})
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Dial mode.
@@ -698,7 +720,8 @@ func newControlPlaneWithContextOptions(
 		outboundName2Id[o.Name] = uint8(i)
 		outboundId2Name[uint8(i)] = o.Name
 	}
-	if err = downloadRuleProvidersThroughRouting(log, locationFinder, routingA, ruleProviderMap, ruleProviderDir, outboundName2Id, outbounds, global, buildOpts.ruleProviderDNSRouter, buildOpts.forceRuleProviderDownload, buildOpts.ignoreRuleProviderErrors); err != nil {
+	ruleProvidersDownloaded, err := downloadRuleProvidersThroughRouting(log, locationFinder, routingA, ruleProviderMap, ruleProviderDir, outboundName2Id, outbounds, global, buildOpts.ruleProviderDNSRouter, buildOpts.forceRuleProviderDownload, buildOpts.ignoreRuleProviderErrors, buildOpts.bestEffortRuleProviderRefresh)
+	if err != nil {
 		return nil, fmt.Errorf("download rule providers: %w", err)
 	}
 	// Apply rules optimizers.
@@ -833,6 +856,15 @@ func newControlPlaneWithContextOptions(
 	}
 
 	/// DNS upstream.
+	// option.DaeDNS compiled the very same request routing program earlier in
+	// this build. Its matcher can be reused only if the rule provider contents
+	// it read are still the ones on disk, which holds exactly when nothing was
+	// downloaded in between; a download may have added or changed a rule set
+	// that the earlier build either skipped or saw an older version of.
+	var sharedRequestMatcher *dns.RequestMatcher
+	if !ruleProvidersDownloaded {
+		sharedRequestMatcher = option.DaeDNS.RequestMatcher()
+	}
 	dnsUpstream, err := dns.New(dnsConfig, &dns.NewOption{
 		Logger:                  log,
 		LocationFinder:          locationFinder,
@@ -841,6 +873,7 @@ func newControlPlaneWithContextOptions(
 		UpstreamReadyCallback:   plane.dnsUpstreamReadyCallback,
 		UpstreamResolverNetwork: common.MagicNetwork("udp", global.SoMarkFromDae, global.Mptcp),
 		UpstreamHostResolver:    upstreamHostResolver,
+		RequestMatcher:          sharedRequestMatcher,
 	})
 	if err != nil {
 		return nil, err
@@ -1603,20 +1636,39 @@ func downloadRuleProvidersThroughRouting(
 	dnsRouter *daedns.Router,
 	force bool,
 	ignoreErrors bool,
-) error {
+	bestEffortRefresh bool,
+) (downloaded bool, err error) {
 	if len(ruleProviderMap) == 0 {
-		return nil
+		return false, nil
 	}
 	log.Infoln("Loading rule providers...")
-	matcher, err := buildRuleProviderDownloadMatcher(log, locationFinder, routingA, ruleProviderMap, ruleProviderDir, outboundName2Id)
-	if err != nil {
-		return fmt.Errorf("build rule provider download router: %w", err)
-	}
-	return routing.DownloadRuleProvidersWithOptions(ruleProviderMap, routing.DownloadRuleProviderOptions{
+	// Building this matcher compiles a whole routing program purely to pick the
+	// outbound a download should use, which costs seconds on router-class
+	// hardware. Downloads only happen for providers missing from the on-disk
+	// cache (or when forced), so build it on first actual use instead: a warm
+	// cache then skips the work entirely. The resolver runs on several download
+	// workers concurrently, hence the Once.
+	var (
+		matcherOnce   sync.Once
+		matcher       *RoutingMatcher
+		matcherErr    error
+		anyDownloaded atomic.Bool
+	)
+	err = routing.DownloadRuleProvidersWithOptions(ruleProviderMap, routing.DownloadRuleProviderOptions{
 		Dir:          ruleProviderDir,
 		Force:        force,
-		IgnoreErrors: ignoreErrors,
+		IgnoreErrors: ignoreErrors || bestEffortRefresh,
+		OnIgnoredError: func(name string, err error) {
+			log.WithError(err).Warnf("[RuleProvider] Failed to refresh %q; continuing with the cached copy", name)
+		},
 		HTTPClientResolver: func(name string, rawURL string) (*http.Client, error) {
+			anyDownloaded.Store(true)
+			matcherOnce.Do(func() {
+				matcher, matcherErr = buildRuleProviderDownloadMatcher(log, locationFinder, routingA, ruleProviderMap, ruleProviderDir, outboundName2Id)
+			})
+			if matcherErr != nil {
+				return nil, fmt.Errorf("build rule provider download router: %w", matcherErr)
+			}
 			client, outboundName, err := ruleProviderHTTPClientFromRouting(log, name, rawURL, matcher, outbounds, global, dnsRouter)
 			if err != nil {
 				return nil, err
@@ -1627,6 +1679,7 @@ func downloadRuleProvidersThroughRouting(
 			return client, nil
 		},
 	})
+	return anyDownloaded.Load(), err
 }
 
 func buildRuleProviderDownloadMatcher(

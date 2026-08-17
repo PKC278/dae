@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -415,6 +416,23 @@ func ruleProviderForceRefreshDue(conf *config.Config, ruleProviderDir string, no
 	return false
 }
 
+// ruleProvidersFullyCached reports whether every configured rule provider has a
+// file on disk. When it does, a refresh that fails leaves every rule set still
+// available, just older, so the refresh can be treated as best-effort instead
+// of a reason to abort startup.
+func ruleProvidersFullyCached(conf *config.Config, ruleProviderDir string) bool {
+	ruleProviders, err := config.KeyableStringMap(conf.RuleProvider)
+	if err != nil || len(ruleProviders) == 0 {
+		return false
+	}
+	for name := range ruleProviders {
+		if _, statErr := os.Stat(filepath.Join(ruleProviderDir, name+".list")); statErr != nil {
+			return false
+		}
+	}
+	return true
+}
+
 func startRuleProviderUpdateLoop(log *logrus.Logger, reloadManager *reloadManager, initialSchedule ruleProviderUpdateSchedule) *ruleProviderUpdateLoop {
 	ctx, cancel := context.WithCancel(context.Background())
 	loop := &ruleProviderUpdateLoop{
@@ -494,6 +512,7 @@ func (r *Runner) Run() (err error) {
 	externGeoDataDirs := r.externGeoDataDirs
 
 	var currCancel context.CancelFunc
+	runStart := time.Now()
 
 	// Remove AbortFile at beginning.
 	_ = os.Remove(AbortFile)
@@ -532,8 +551,10 @@ func (r *Runner) Run() (err error) {
 					_ = os.WriteFile(PidFilePath, []byte(strconv.Itoa(os.Getpid())), 0644)
 				}
 				_ = setRunSignalProgress(consts.ReloadDone, "")
+				logger.Milestone(log, "dae is now proxying traffic (tproxy port %v, ready in %v)",
+					conf.Global.TproxyPort, time.Since(runStart).Round(time.Millisecond))
 			} else {
-				log.Warn("Initialization failed; not signaling readiness to supervisor")
+				log.Errorln("Initialization failed; not signaling readiness to supervisor")
 			}
 		}()
 		defer func() {
@@ -620,8 +641,8 @@ func (r *Runner) Run() (err error) {
 			log = logrus.New()
 			logger.SetLogger(log, newConf.Global.LogLevel, disableTimestamp, nil)
 			logger.SetLogger(logrus.StandardLogger(), newConf.Global.LogLevel, disableTimestamp, nil)
-			log.SetOutput(oldLogOutput) // NOTE: Restore log output after creating new logger during reload.
-			logrus.SetOutput(oldLogOutput)
+			logger.SetOutput(log, oldLogOutput) // NOTE: Restore log output after creating new logger during reload.
+			logger.SetOutput(logrus.StandardLogger(), oldLogOutput)
 
 			portChanged := conf.Global.TproxyPort != newConf.Global.TproxyPort
 			stagedHotHandoff := !portChanged && listener != nil
@@ -1317,7 +1338,29 @@ func configureTransparentHugePages(log *logrus.Logger, disable bool) {
 	}
 }
 
+// startupGCPercent trades peak heap for construction latency. Building the
+// routing and DNS domain matchers allocates heavily while keeping the tries
+// themselves alive, so at the default GOGC=100 the collector runs repeatedly
+// over a large live set. Measured on an aarch64 router with a 140k-domain rule
+// set, raising it cuts control plane construction from ~13.7s to ~4.5s for
+// roughly +50MB of peak RSS. Beyond 400 the time gain flattens while peak RSS
+// keeps climbing.
+const startupGCPercent = 400
+
+// boostStartupGC raises the GC target for the duration of control plane
+// construction and returns a function that restores the previous setting. An
+// explicit GOGC in the environment is an operator decision and is left alone.
+func boostStartupGC() func() {
+	if _, explicit := os.LookupEnv("GOGC"); explicit {
+		return func() {}
+	}
+	previous := debug.SetGCPercent(startupGCPercent)
+	return func() { debug.SetGCPercent(previous) }
+}
+
 func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, dnsCache map[string]*control.DnsCache, conf *config.Config, externGeoDataDirs []string, prepareOnly bool, forceRuleProviderDownload bool, ignoreRuleProviderErrors bool) (c *control.ControlPlane, err error) {
+	defer boostStartupGC()()
+
 	// Deep copy to prevent modification.
 	conf = deepcopy.Copy(conf).(*config.Config)
 	if conf.Global.SoMarkFromDae == 0 {
@@ -1349,8 +1392,15 @@ func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, d
 		return nil, fmt.Errorf("rule_provider: %w", err)
 	}
 	ruleProviderDir := filepath.Join(filepath.Dir(cfgFile), "rules")
+	// A refresh triggered purely by age must not be able to keep dae from
+	// starting. Every rule set already has a cached copy in that case, so a
+	// download failure -- a reboot before the WAN is up, most typically -- only
+	// means carrying on with slightly stale rules. A rule set that is missing
+	// altogether is still fatal: routing cannot be built without it.
+	bestEffortRuleProviderRefresh := false
 	if !forceRuleProviderDownload && ruleProviderForceRefreshDue(conf, ruleProviderDir, time.Now()) {
 		forceRuleProviderDownload = true
+		bestEffortRuleProviderRefresh = ruleProvidersFullyCached(conf, ruleProviderDir)
 		log.Infoln("[RuleProvider] Cached rule provider is due; force refreshing all rule providers")
 	}
 	daeDNSRouter, err := daedns.NewWithOption(log, &conf.Global, &conf.Dns, &daedns.NewOption{
@@ -1527,6 +1577,9 @@ func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, d
 		if ignoreRuleProviderErrors {
 			opts = append(opts, control.WithIgnoreRuleProviderErrors(true))
 		}
+		if bestEffortRuleProviderRefresh {
+			opts = append(opts, control.WithBestEffortRuleProviderRefresh(true))
+		}
 		if daeDNSRouter != nil {
 			opts = append(opts, control.WithRuleProviderDNSRouter(daeDNSRouter))
 		}
@@ -1552,6 +1605,9 @@ func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, d
 		}
 		if ignoreRuleProviderErrors {
 			opts = append(opts, control.WithIgnoreRuleProviderErrors(true))
+		}
+		if bestEffortRuleProviderRefresh {
+			opts = append(opts, control.WithBestEffortRuleProviderRefresh(true))
 		}
 		if daeDNSRouter != nil {
 			opts = append(opts, control.WithRuleProviderDNSRouter(daeDNSRouter))
