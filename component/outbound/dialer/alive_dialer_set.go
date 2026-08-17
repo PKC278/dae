@@ -32,6 +32,10 @@ type minLatency struct {
 type aliveEntry struct {
 	dialer         *Dialer
 	sortingLatency time.Duration
+	// priority is the index of the dialer in the group declaration. Removal
+	// swaps entries with the tail, so the fallback policy cannot rely on the
+	// slice order to know which dialer the user put first.
+	priority int
 }
 
 // AliveDialerSet assumes mapping between index and dialer MUST remain unchanged.
@@ -49,6 +53,7 @@ type AliveDialerSet struct {
 	dialerToIndex         map[*Dialer]int // *Dialer -> index in aliveEntries, -Init, or -NotAlive
 	dialerToLatency       map[*Dialer]time.Duration
 	dialerToLatencyOffset map[*Dialer]time.Duration
+	dialerToPriority      map[*Dialer]int
 
 	// aliveEntries stores all alive dialers with their precomputed sorting latency.
 	// This is the primary data structure for hot path operations (GetMinLatency, GetRandExcluded).
@@ -57,6 +62,9 @@ type AliveDialerSet struct {
 
 	selectionPolicy consts.DialerSelectionPolicy
 	minLatency      minLatency
+	// firstAlive caches the fallback candidate so selection stays O(1) on the
+	// hot path. It is only maintained for the fallback policy.
+	firstAlive *Dialer
 }
 
 func NewAliveDialerSet(
@@ -74,9 +82,15 @@ func NewAliveDialerSet(
 		panic(fmt.Sprintf("unmatched annotations length: %v dialers and %v annotations", len(dialers), len(dialersAnnotations)))
 	}
 	dialerToLatencyOffset := make(map[*Dialer]time.Duration)
+	dialerToPriority := make(map[*Dialer]int, len(dialers))
 	for i := range dialers {
 		d, a := dialers[i], dialersAnnotations[i]
 		dialerToLatencyOffset[d] = a.AddLatency
+		// A dialer repeated in one group keeps the earliest position so the
+		// fallback order stays the one the user wrote.
+		if _, ok := dialerToPriority[d]; !ok {
+			dialerToPriority[d] = i
+		}
 	}
 	a := &AliveDialerSet{
 		log:                   log,
@@ -87,6 +101,7 @@ func NewAliveDialerSet(
 		dialerToIndex:         make(map[*Dialer]int),
 		dialerToLatency:       make(map[*Dialer]time.Duration),
 		dialerToLatencyOffset: dialerToLatencyOffset,
+		dialerToPriority:      dialerToPriority,
 		aliveEntries:          make([]aliveEntry, 0, len(dialers)),
 		selectionPolicy:       selectionPolicy,
 		minLatency: minLatency{
@@ -184,6 +199,111 @@ func (a *AliveDialerSet) GetMinLatency(excluded *Dialer) (d *Dialer, latency tim
 	return nil, time.Hour
 }
 
+// GetFirstAlive returns the alive dialer declared earliest in the group, which
+// implements the fallback policy. It returns nil when no dialer is alive, and
+// also when the set does not run the fallback policy, since only that policy
+// maintains the candidate.
+func (a *AliveDialerSet) GetFirstAlive(excluded *Dialer) *Dialer {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	if excluded != nil && a.firstAlive == excluded {
+		return a.calcFirstAliveLocked(excluded)
+	}
+	return a.firstAlive
+}
+
+func (a *AliveDialerSet) calcFirstAliveLocked(excluded *Dialer) *Dialer {
+	var (
+		chosen       *Dialer
+		bestPriority int
+	)
+	for i := range a.aliveEntries {
+		entry := &a.aliveEntries[i]
+		if entry.dialer == excluded {
+			continue
+		}
+		if chosen == nil || entry.priority < bestPriority {
+			chosen = entry.dialer
+			bestPriority = entry.priority
+		}
+	}
+	return chosen
+}
+
+// refreshFirstAliveLocked re-picks the fallback candidate after an aliveness
+// change and reports the switch, mirroring what the min-latency policies log.
+func (a *AliveDialerSet) refreshFirstAliveLocked() {
+	previous := a.firstAlive
+	a.firstAlive = a.calcFirstAliveLocked(nil)
+	if a.firstAlive == previous || !a.log.IsLevelEnabled(logrus.InfoLevel) {
+		return
+	}
+	if a.firstAlive == nil {
+		a.log.WithFields(logrus.Fields{
+			"group":   a.dialerGroupName,
+			"network": a.CheckTyp.String(),
+		}).Infof("Group has no dialer alive")
+		return
+	}
+	oldDialerName := "<nil>"
+	re := ""
+	if previous != nil {
+		oldDialerName = previous.property.Name
+		re = "re-"
+	}
+	a.log.WithFields(logrus.Fields{
+		string(a.selectionPolicy): a.dialerToPriority[a.firstAlive],
+		"_new_dialer":             a.firstAlive.property.Name,
+		"_old_dialer":             oldDialerName,
+		"group":                   a.dialerGroupName,
+		"network":                 a.CheckTyp.String(),
+	}).Infof("Group %vselects dialer", re)
+
+	a.printFallbackChain()
+}
+
+// printFallbackChain lists the group in priority order with each node's health,
+// which is what explains why the selection landed where it did. It takes the
+// place printLatencies has for the min-latency policies, where the latency table
+// carries the same "why this node" information.
+func (a *AliveDialerSet) printFallbackChain() {
+	type chainEntry struct {
+		name     string
+		subtag   string
+		priority int
+		alive    bool
+	}
+	entries := make([]chainEntry, 0, len(a.dialerToPriority))
+	for d, priority := range a.dialerToPriority {
+		index, tracked := a.dialerToIndex[d]
+		entries = append(entries, chainEntry{
+			name:     d.property.Name,
+			subtag:   d.property.SubscriptionTag,
+			priority: priority,
+			alive:    tracked && index >= 0,
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].priority < entries[j].priority
+	})
+
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "Group '%v' [%v]:\n", a.dialerGroupName, a.CheckTyp.String())
+	for _, e := range entries {
+		state := "NOT ALIVE"
+		marker := "  "
+		if e.alive {
+			state = "alive"
+			if a.firstAlive != nil && e.priority == a.dialerToPriority[a.firstAlive] {
+				marker = "=>"
+			}
+		}
+		fmt.Fprintf(&builder, "%v%3d. [%v] %v: %v\n", marker, e.priority+1, e.subtag, e.name, state)
+	}
+	a.log.Infoln(strings.TrimSuffix(builder.String(), "\n"))
+}
+
 func (a *AliveDialerSet) printLatencies() {
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "Group '%v' [%v]:\n", a.dialerGroupName, a.CheckTyp.String())
@@ -255,6 +375,7 @@ func (a *AliveDialerSet) NotifyLatencyChange(dialer *Dialer, alive bool) {
 			a.aliveEntries = append(a.aliveEntries, aliveEntry{
 				dialer:         dialer,
 				sortingLatency: 0, // Will be updated below if hasLatency
+				priority:       a.dialerToPriority[dialer],
 			})
 		}
 	} else {
@@ -304,6 +425,10 @@ func (a *AliveDialerSet) NotifyLatencyChange(dialer *Dialer, alive bool) {
 				}
 			}
 		}
+	}
+
+	if a.selectionPolicy == consts.DialerSelectionPolicy_Fallback {
+		a.refreshFirstAliveLocked()
 	}
 
 	if hasLatency {
@@ -424,6 +549,12 @@ func (a *AliveDialerSet) recomputeSelectionStateLocked() {
 	a.dialerToLatency = make(map[*Dialer]time.Duration, len(a.dialerToLatencyOffset))
 	a.minLatency = minLatency{
 		sortingLatency: time.Hour,
+	}
+	a.firstAlive = nil
+
+	if a.selectionPolicy == consts.DialerSelectionPolicy_Fallback {
+		a.refreshFirstAliveLocked()
+		return
 	}
 
 	if !isMinLatencyPolicy(a.selectionPolicy) {

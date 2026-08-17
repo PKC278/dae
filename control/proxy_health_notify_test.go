@@ -32,14 +32,29 @@ func TestRouteDial_ProxyDialFailureNotifiesTcpHealthCheck(t *testing.T) {
 	d, _ := newTestEndpointErrorDialer("hysteria2", "proxy.example:443", io.ErrUnexpectedEOF)
 	cp := newTestDialControlPlane(newTestFixedOutboundGroup(d))
 
-	_, _, err := cp.routeDial(context.Background(), &proxyDialParam{
-		Outbound: consts.OutboundUserDefinedMin,
-		Src:      netip.MustParseAddrPort("192.0.2.10:34567"),
-		Dest:     netip.MustParseAddrPort("198.51.100.10:443"),
-		Network:  "tcp",
-	})
-	if err == nil {
-		t.Fatal("routeDial() error = nil, want failure")
+	dial := func() {
+		t.Helper()
+		_, _, err := cp.routeDial(context.Background(), &proxyDialParam{
+			Outbound: consts.OutboundUserDefinedMin,
+			Src:      netip.MustParseAddrPort("192.0.2.10:34567"),
+			Dest:     netip.MustParseAddrPort("198.51.100.10:443"),
+			Network:  "tcp",
+		})
+		if err == nil {
+			t.Fatal("routeDial() error = nil, want failure")
+		}
+	}
+
+	// A lone failure is more likely the destination's fault than the node's, so
+	// it must not cost a probe.
+	dial()
+	if got := dialerSignalChannelLen(t, d, "checkTcpCh"); got != 0 {
+		t.Fatalf("checkTcpCh len after one failure = %d, want 0", got)
+	}
+
+	// Failures clustered inside the window point at the node.
+	for range componentdialer.DialFailureThreshold - 1 {
+		dial()
 	}
 	if got := dialerSignalChannelLen(t, d, "checkTcpCh"); got != 1 {
 		t.Fatalf("checkTcpCh len = %d, want 1", got)
@@ -80,7 +95,13 @@ func TestDnsControllerReportDnsForwardFailure_NotifiesDnsUdpHealthCheck(t *testi
 	}
 
 	ctrl.reportDnsForwardFailure(dialArg, io.ErrUnexpectedEOF)
+	if got := dialerSignalChannelLen(t, d, "checkDnsUdpCh"); got != 0 {
+		t.Fatalf("checkDnsUdpCh len after one failure = %d, want 0", got)
+	}
 
+	for range componentdialer.DialFailureThreshold - 1 {
+		ctrl.reportDnsForwardFailure(dialArg, io.ErrUnexpectedEOF)
+	}
 	if got := dialerSignalChannelLen(t, d, "checkDnsUdpCh"); got != 1 {
 		t.Fatalf("checkDnsUdpCh len = %d, want 1", got)
 	}

@@ -137,6 +137,11 @@ type Dialer struct {
 	lastNotifyTcp atomic.Int64
 	lastPunish    [3]atomic.Int64
 
+	// dialFailures gates probes triggered by real connection failures.
+	//   0: TCP
+	//   1: UDP
+	dialFailures [2]dialFailureTracker
+
 	recoveryManagerMu sync.Mutex
 	recoveryManager   *dialerRecoveryManager
 }

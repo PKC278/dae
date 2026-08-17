@@ -529,3 +529,241 @@ func TestDialerGroup_Select_DataUdpFixedPolicyDoesNotFallback(t *testing.T) {
 		t.Fatalf("expected fixed policy to keep selecting dialers[1], got another dialer")
 	}
 }
+
+func TestDialerGroup_Select_Fallback(t *testing.T) {
+	option := &dialer.GlobalOption{
+		Log:               log,
+		TcpCheckOptionRaw: dialer.TcpCheckOptionRaw{Raw: []string{testTcpCheckUrl}},
+		CheckDnsOptionRaw: dialer.CheckDnsOptionRaw{Raw: []string{testUdpCheckDns}},
+		CheckInterval:     15 * time.Second,
+		CheckTolerance:    0,
+	}
+	dialers := []*dialer.Dialer{
+		newDirectDialer(option, false),
+		newDirectDialer(option, false),
+		newDirectDialer(option, false),
+	}
+	g := NewDialerGroup(option, "test-group", dialers, newEmptyAnnotations(len(dialers)),
+		DialerSelectionPolicy{
+			Policy: consts.DialerSelectionPolicy_Fallback,
+		}, func(alive bool, networkType *dialer.NetworkType, isInit bool) {})
+	set := g.MustGetAliveDialerSet(TestNetworkType)
+
+	assertSelected := func(want *dialer.Dialer, msg string) {
+		t.Helper()
+		for range 10 {
+			d, _, err := g.Select(TestNetworkType, false)
+			if err != nil {
+				t.Fatalf("%v: %v", msg, err)
+			}
+			if d != want {
+				t.Fatalf("%v: selected an unexpected dialer", msg)
+			}
+		}
+	}
+
+	assertSelected(dialers[0], "all alive")
+
+	markDialersDead(set, dialers[0])
+	assertSelected(dialers[1], "first dialer dead")
+
+	markDialersDead(set, dialers[1])
+	assertSelected(dialers[2], "first two dialers dead")
+
+	set.NotifyLatencyChange(dialers[0], true)
+	assertSelected(dialers[0], "first dialer recovered")
+}
+
+func TestDialerGroup_Select_FallbackExcludesFailedDialer(t *testing.T) {
+	option := &dialer.GlobalOption{
+		Log:               log,
+		TcpCheckOptionRaw: dialer.TcpCheckOptionRaw{Raw: []string{testTcpCheckUrl}},
+		CheckDnsOptionRaw: dialer.CheckDnsOptionRaw{Raw: []string{testUdpCheckDns}},
+		CheckInterval:     15 * time.Second,
+		CheckTolerance:    0,
+	}
+	dialers := []*dialer.Dialer{
+		newDirectDialer(option, false),
+		newDirectDialer(option, false),
+		newDirectDialer(option, false),
+	}
+	g := NewDialerGroup(option, "test-group", dialers, newEmptyAnnotations(len(dialers)),
+		DialerSelectionPolicy{
+			Policy: consts.DialerSelectionPolicy_Fallback,
+		}, func(alive bool, networkType *dialer.NetworkType, isInit bool) {})
+
+	d, _, err := g.SelectWithExclusion(TestNetworkType, false, dialers[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d != dialers[1] {
+		t.Fatal("retry after a failed dial should pick the next dialer in group order")
+	}
+}
+
+func newTestGroupWithAllDialersDead(t *testing.T, policy consts.DialerSelectionPolicy, count int) (*DialerGroup, []*dialer.Dialer) {
+	t.Helper()
+
+	option := &dialer.GlobalOption{
+		Log:               log,
+		TcpCheckOptionRaw: dialer.TcpCheckOptionRaw{Raw: []string{testTcpCheckUrl}},
+		CheckDnsOptionRaw: dialer.CheckDnsOptionRaw{Raw: []string{testUdpCheckDns}},
+		CheckInterval:     15 * time.Second,
+		CheckTolerance:    0,
+	}
+	dialers := make([]*dialer.Dialer, 0, count)
+	for range count {
+		dialers = append(dialers, newDirectDialer(option, false))
+	}
+	g := NewDialerGroup(option, "test-group", dialers, newEmptyAnnotations(len(dialers)),
+		DialerSelectionPolicy{Policy: policy},
+		func(alive bool, networkType *dialer.NetworkType, isInit bool) {})
+
+	for _, d := range dialers {
+		d.ReportUnavailableForced(TestNetworkType, errors.New("forced dead"))
+		d.ReportUnavailableForced(&dialer.NetworkType{
+			L4Proto:   consts.L4ProtoStr_TCP,
+			IpVersion: consts.IpVersionStr_6,
+		}, errors.New("forced dead"))
+	}
+	return g, dialers
+}
+
+// A dead group still hands back the preferred node rather than refusing: the
+// node may have recovered since the last health check, and refusing guarantees
+// a failed connection.
+func TestDialerGroup_Select_FallbackLastResort(t *testing.T) {
+	g, dialers := newTestGroupWithAllDialersDead(t, consts.DialerSelectionPolicy_Fallback, 3)
+
+	d, _, err := g.Select(TestNetworkType, false)
+	if err != nil {
+		t.Fatalf("dead fallback group should still return a dialer, got err = %v", err)
+	}
+	if d != dialers[0] {
+		t.Fatal("last resort should be the first dialer in group order")
+	}
+}
+
+func TestDialerGroup_Select_FallbackLastResortSkipsExcluded(t *testing.T) {
+	g, dialers := newTestGroupWithAllDialersDead(t, consts.DialerSelectionPolicy_Fallback, 3)
+
+	d, _, err := g.SelectWithExclusion(TestNetworkType, false, dialers[0])
+	if err != nil {
+		t.Fatalf("dead fallback group should still return a dialer, got err = %v", err)
+	}
+	if d != dialers[1] {
+		t.Fatal("last resort should skip the dialer that just failed")
+	}
+
+	// Nothing left to prefer once every candidate has been excluded.
+	single, _ := newTestGroupWithAllDialersDead(t, consts.DialerSelectionPolicy_Fallback, 1)
+	only := single.Dialers[0]
+	d, _, err = single.SelectWithExclusion(TestNetworkType, false, only)
+	if err != nil || d != only {
+		t.Fatalf("single-dialer group should return its only dialer, got %v err = %v", d, err)
+	}
+}
+
+// Other policies keep refusing: they have no declared preference order, so
+// there is no meaningful node to fall back to.
+func TestDialerGroup_Select_NoLastResortForUnorderedPolicies(t *testing.T) {
+	for _, policy := range []consts.DialerSelectionPolicy{
+		consts.DialerSelectionPolicy_Random,
+		consts.DialerSelectionPolicy_MinLastLatency,
+	} {
+		t.Run(string(policy), func(t *testing.T) {
+			g, _ := newTestGroupWithAllDialersDead(t, policy, 2)
+			if _, _, err := g.Select(TestNetworkType, false); !errors.Is(err, ErrNoAliveDialer) {
+				t.Fatalf("err = %v, want ErrNoAliveDialer", err)
+			}
+		})
+	}
+}
+
+// A single-dialer group has nothing to choose between, so it keeps the
+// pre-existing behaviour of returning that dialer under any policy.
+func TestDialerGroup_Select_SingleDialerLastResortAnyPolicy(t *testing.T) {
+	g, dialers := newTestGroupWithAllDialersDead(t, consts.DialerSelectionPolicy_Random, 1)
+
+	d, _, err := g.Select(TestNetworkType, false)
+	if err != nil {
+		t.Fatalf("single-dialer group should not refuse, got err = %v", err)
+	}
+	if d != dialers[0] {
+		t.Fatal("single-dialer group returned an unexpected dialer")
+	}
+}
+
+// A deliberately lazy check schedule must not also delay recovery detection: the
+// resuscitation rate limit only guards the worker pool, so it is capped
+// independently of check_interval.
+func TestDialerGroup_ResuscitateIntervalIsCapped(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		checkInterval time.Duration
+		wantProbe     time.Duration
+		wantLog       time.Duration
+	}{
+		{
+			name:          "lazy schedule is capped",
+			checkInterval: 30 * time.Minute,
+			wantProbe:     maxResuscitateInterval,
+			wantLog:       maxNoAliveLogInterval,
+		},
+		{
+			name:          "eager schedule is left alone",
+			checkInterval: 3 * time.Second,
+			wantProbe:     3 * time.Second,
+			wantLog:       15 * time.Second,
+		},
+		{
+			name:          "log floor still applies",
+			checkInterval: time.Second,
+			wantProbe:     time.Second,
+			wantLog:       10 * time.Second,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := &DialerGroup{cachedMinCheckInterval: tc.checkInterval}
+			if got := g.resuscitateInterval(); got != tc.wantProbe {
+				t.Fatalf("resuscitateInterval() = %v, want %v", got, tc.wantProbe)
+			}
+			if got := g.noAliveLogInterval(); got != tc.wantLog {
+				t.Fatalf("noAliveLogInterval() = %v, want %v", got, tc.wantLog)
+			}
+		})
+	}
+}
+
+// The cap has to hold for a real group too, not just a hand-built struct.
+func TestDialerGroup_ResuscitateIntervalCappedForRealGroup(t *testing.T) {
+	option := &dialer.GlobalOption{
+		Log:               log,
+		TcpCheckOptionRaw: dialer.TcpCheckOptionRaw{Raw: []string{testTcpCheckUrl}},
+		CheckDnsOptionRaw: dialer.CheckDnsOptionRaw{Raw: []string{testUdpCheckDns}},
+		CheckInterval:     30 * time.Minute,
+		CheckTolerance:    0,
+	}
+	dialers := []*dialer.Dialer{
+		newDirectDialer(option, false),
+		newDirectDialer(option, false),
+	}
+	g := NewDialerGroup(option, "test-group", dialers, newEmptyAnnotations(len(dialers)),
+		DialerSelectionPolicy{Policy: consts.DialerSelectionPolicy_Fallback},
+		func(alive bool, networkType *dialer.NetworkType, isInit bool) {})
+
+	if got := g.MinCheckInterval(); got != 30*time.Minute {
+		t.Fatalf("MinCheckInterval() = %v, want 30m", got)
+	}
+	if got := g.resuscitateInterval(); got != maxResuscitateInterval {
+		t.Fatalf("resuscitateInterval() = %v, want %v", got, maxResuscitateInterval)
+	}
+
+	// A first probe goes through, an immediate second one is still rate-limited.
+	if !g.Resuscitate(TestNetworkType) {
+		t.Fatal("first resuscitation should be signaled")
+	}
+	if g.Resuscitate(TestNetworkType) {
+		t.Fatal("second resuscitation within the interval should be rate-limited")
+	}
+}

@@ -315,6 +315,18 @@ group {
         # Select the first node from the group for every connection.
         #policy: fixed(0)
 
+        # Select the first alive node from the group for every connection. Nodes act as
+        # a priority chain: traffic falls to the next one only while the preceding ones
+        # fail their health check, and returns to the preferred one as soon as it
+        # recovers.
+        # The priority is the order the nodes appear in the node/subscription section,
+        # NOT the order they are written inside filter(). A filter only selects nodes,
+        # it never reorders them, so put the preferred node first where it is defined.
+        # When every node in the group is failing its health check, traffic is still
+        # sent to the preferred node instead of being dropped, since it may have
+        # recovered since the last check.
+        #policy: fallback
+
         # Select the node with min last latency from the group for every connection.
         #policy: min
 

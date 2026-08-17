@@ -37,6 +37,10 @@ import (
 
 const Timeout = 10 * time.Second
 
+// ResuscitationTimeout bounds probes triggered by a real connection failure,
+// where discovering a dead node quickly matters more than tolerating a slow one.
+const ResuscitationTimeout = 5 * time.Second
+
 type UdpHealthDomain uint8
 
 const (
@@ -793,6 +797,66 @@ func (d *Dialer) NotifyCheck() {
 	}
 }
 
+const (
+	// DialFailureWindow bounds how long connection failures accumulate. Failures
+	// spread wider than this never add up to a probe, so a node that fails once
+	// in a while — or a destination the user keeps retrying — cannot slowly
+	// build up enough of them to matter.
+	DialFailureWindow = 5 * time.Second
+	// DialFailureThreshold is how many failures inside that window make the node,
+	// rather than the destination, the likely cause. It sits below mihomo's 5
+	// because a failed probe here kills the node on the first try, so the group
+	// has to react sooner.
+	DialFailureThreshold = 3
+)
+
+// dialFailureTracker counts connection failures inside a sliding window.
+type dialFailureTracker struct {
+	mu    sync.Mutex
+	count int
+	first time.Time
+}
+
+// ReportDialFailure records that a real connection through this dialer failed
+// and asks for a probe once failures cluster inside the window.
+//
+// Probing on every single failure cannot tell a broken node from a broken
+// destination: both surface as a dial error, and a SOCKS5 server reports the
+// destination's refusal with the same wording as its own. A broken destination
+// makes requests fail one at a time, which never fills the window; a broken
+// node fails everything and fills it immediately.
+func (d *Dialer) ReportDialFailure(l4proto consts.L4ProtoStr) {
+	idx := 0
+	if l4proto == consts.L4ProtoStr_UDP {
+		idx = 1
+	}
+	tracker := &d.dialFailures[idx]
+	now := time.Now()
+
+	tracker.mu.Lock()
+	if tracker.count == 0 || now.Sub(tracker.first) > DialFailureWindow {
+		// Start a new window. An expired window is dropped rather than carried
+		// over, which is what keeps sparse failures from ever accumulating.
+		tracker.count = 1
+		tracker.first = now
+		tracker.mu.Unlock()
+		return
+	}
+	tracker.count++
+	if tracker.count < DialFailureThreshold {
+		tracker.mu.Unlock()
+		return
+	}
+	tracker.count = 0
+	tracker.mu.Unlock()
+
+	if l4proto == consts.L4ProtoStr_UDP {
+		d.NotifyCheckDnsUdp()
+		return
+	}
+	d.NotifyCheckTcp()
+}
+
 // NotifyCheckDnsUdp triggers a targeted DNS-UDP health check for both IPv4 and IPv6.
 func (d *Dialer) NotifyCheckDnsUdp() {
 	select {
@@ -1102,12 +1166,22 @@ func (d *Dialer) Check(opts *CheckOption) (ok bool, err error) {
 }
 
 func (d *Dialer) check(opts *CheckOption, isResuscitation bool, cycle *cycleResult) (ok bool, err error) {
-	const maxAttempts = 2
+	// A resuscitation probe runs because a real connection just failed, so every
+	// second spent here is a second the group keeps handing traffic to a node
+	// that is likely dead. Probe once with a short deadline; the periodic check,
+	// which is tuned against false negatives, still gets the full budget and
+	// revives a node that was merely slow.
+	maxAttempts := 2
+	timeout := Timeout
+	if isResuscitation {
+		maxAttempts = 1
+		timeout = ResuscitationTimeout
+	}
 	var bestLatency time.Duration
 	checkedAt := time.Now()
 
 	for i := 0; i < maxAttempts; i++ {
-		ctx, cancel := context.WithTimeout(d.ctx, Timeout)
+		ctx, cancel := context.WithTimeout(d.ctx, timeout)
 		start := time.Now()
 		ok, err = opts.CheckFunc(ctx, opts.networkType)
 		latency := time.Since(start)

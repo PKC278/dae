@@ -67,11 +67,9 @@ func notifyProxyDialerHealthCheck(d *dialer.Dialer, l4proto consts.L4ProtoStr, e
 	if commonerrors.IsCanceledOrClosed(err) || !isProxyBackedDialer(d) {
 		return
 	}
-	if l4proto == consts.L4ProtoStr_UDP {
-		d.NotifyCheckDnsUdp()
-		return
-	}
-	d.NotifyCheckTcp()
+	// The dialer decides whether this failure is worth a probe: a single broken
+	// destination should not cost the node one.
+	d.ReportDialFailure(l4proto)
 }
 
 func alternateNetworkType(networkType *dialer.NetworkType) *dialer.NetworkType {

@@ -199,6 +199,30 @@ func (g *DialerGroup) EnsureReloadSelectionFloor(fallback ReloadSelectionFallbac
 	}
 }
 
+const (
+	// maxResuscitateInterval caps the gap between whole-group probes. The rate
+	// limit only exists so a burst of failed connections cannot flood the
+	// health-check pool, which is a sub-second concern; deriving it from
+	// check_interval alone meant a 30-minute interval also spent 30 minutes not
+	// noticing that a node had come back.
+	maxResuscitateInterval = 10 * time.Second
+	// maxNoAliveLogInterval caps the "no alive dialer" notice for the same
+	// reason: a long check_interval must not push a report of a total outage
+	// hours apart.
+	maxNoAliveLogInterval = time.Minute
+)
+
+// resuscitateInterval is how long the group waits before probing every node
+// again after finding none alive. It stays below the periodic check interval so
+// recovery detection does not inherit a deliberately lazy check schedule.
+func (g *DialerGroup) resuscitateInterval() time.Duration {
+	return min(g.cachedMinCheckInterval, maxResuscitateInterval)
+}
+
+func (g *DialerGroup) noAliveLogInterval() time.Duration {
+	return min(max(g.cachedMinCheckInterval*5, 10*time.Second), maxNoAliveLogInterval)
+}
+
 // tryDoRateLimitedAction checks if an action can be performed based on a rate limit.
 // It uses atomic operations to ensure thread-safety with minimal overhead.
 func (g *DialerGroup) tryDoRateLimitedAction(last *atomic.Int64, interval time.Duration) bool {
@@ -222,14 +246,14 @@ func (g *DialerGroup) HandleNoAliveDialer(
 	domain string,
 	strictIpVersion bool,
 ) {
-	// 1. Attempt resuscitation (rate-limited by min check interval)
-	if g.tryDoRateLimitedAction(&g.resuscitateLastTime, g.cachedMinCheckInterval) {
+	// 1. Attempt resuscitation
+	if g.tryDoRateLimitedAction(&g.resuscitateLastTime, g.resuscitateInterval()) {
 		g.resuscitate(selectionNetworkType)
 	}
 
-	// 2. Log the failure (rate-limited by 5x check interval, min 10s)
+	// 2. Log the failure
 	idx := selectionNetworkType.Index()
-	logInterval := max(g.cachedMinCheckInterval*5, 10*time.Second)
+	logInterval := g.noAliveLogInterval()
 
 	if g.tryDoRateLimitedAction(&g.noAliveLogLastTimes[idx], logInterval) {
 		g.logNoAlive(origNetworkType, selectionNetworkType, src, dst, domain, strictIpVersion, logInterval)
@@ -237,10 +261,10 @@ func (g *DialerGroup) HandleNoAliveDialer(
 }
 
 // Resuscitate triggers a targeted health check for all dialers in the group.
-// It is rate-limited to once per group per MinCheckInterval to prevent worker pool starvation.
+// It is rate-limited per group to prevent worker pool starvation.
 // Returns true if a resuscitation probe was actually signaled.
 func (g *DialerGroup) Resuscitate(networkType *dialer.NetworkType) bool {
-	if g.tryDoRateLimitedAction(&g.resuscitateLastTime, g.cachedMinCheckInterval) {
+	if g.tryDoRateLimitedAction(&g.resuscitateLastTime, g.resuscitateInterval()) {
 		g.resuscitate(networkType)
 		return true
 	}
@@ -312,26 +336,71 @@ func (g *DialerGroup) SelectWithExclusionResult(networkType *dialer.NetworkType,
 	state := g.currentSelectionState()
 	policy := state.policy
 	d, latency, selectedNetworkType, err = g._select(networkType, state, policy, excluded)
+	if err == nil {
+		return d, latency, selectedNetworkType, nil
+	}
 	if !strictIpVersion && errors.Is(err, ErrNoAliveDialer) {
 		// Fallback to another ipversion. Use local copy to avoid modifying the original networkType if it's passed by reference.
 		nt := *networkType
 		nt.IpVersion = (consts.IpVersion_X - networkType.IpVersion.ToIpVersionType()).ToIpVersionStr()
-		return g._select(&nt, state, policy, excluded)
-	}
-	if err == nil {
-		return d, latency, selectedNetworkType, nil
-	}
-	if errors.Is(err, ErrNoAliveDialer) && len(g.Dialers) == 1 {
-		// There is only one dialer in this group. Just choose it instead of return error.
-		if d, _, selectedNetworkType, err = g._select(networkType, state, DialerSelectionPolicy{
-			Policy:     consts.DialerSelectionPolicy_Fixed,
-			FixedIndex: 0,
-		}, excluded); err != nil {
-			return nil, 0, nil, err
+		if d, latency, selectedNetworkType, err = g._select(&nt, state, policy, excluded); err == nil {
+			return d, latency, selectedNetworkType, nil
 		}
-		return d, dialer.Timeout, selectedNetworkType, nil
+	}
+	if !errors.Is(err, ErrNoAliveDialer) {
+		return nil, latency, selectedNetworkType, err
+	}
+	if d = g.lastResortDialer(policy, excluded); d != nil {
+		// The group is down as far as health checks know. Refusing guarantees a
+		// failed connection, so hand back the preferred node instead: it may have
+		// recovered since the last check, and the probe we kick off here confirms
+		// it either way.
+		g.Resuscitate(networkType)
+		g.logLastResort(networkType, d)
+		return d, dialer.Timeout, networkType, nil
 	}
 	return nil, latency, selectedNetworkType, err
+}
+
+// lastResortDialer picks a dialer to try when no dialer in the group is alive.
+// Only policies carrying an explicit preference order do this: fallback ranks
+// nodes by declaration, and a single-dialer group has nothing to choose between.
+// random and min have no meaningful "preferred" node, so they keep reporting
+// ErrNoAliveDialer and let the caller decide.
+func (g *DialerGroup) lastResortDialer(policy DialerSelectionPolicy, excluded *dialer.Dialer) *dialer.Dialer {
+	if len(g.Dialers) == 0 {
+		return nil
+	}
+	if len(g.Dialers) != 1 && policy.Policy != consts.DialerSelectionPolicy_Fallback {
+		return nil
+	}
+	for _, d := range g.Dialers {
+		if d != excluded {
+			return d
+		}
+	}
+	// Every candidate was excluded by a failed attempt; the preferred node is
+	// still a better answer than dropping the connection.
+	return g.Dialers[0]
+}
+
+func (g *DialerGroup) logLastResort(networkType *dialer.NetworkType, d *dialer.Dialer) {
+	idx := networkType.Index()
+	interval := g.noAliveLogInterval()
+	if !g.tryDoRateLimitedAction(&g.noAliveLogLastTimes[idx], interval) {
+		return
+	}
+	dialerName := ""
+	if p := d.Property(); p != nil {
+		dialerName = p.Name
+	}
+	g.log.WithFields(logrus.Fields{
+		"outbound": g.Name,
+		"network":  networkType.String(),
+		"dialer":   dialerName,
+		"total":    len(g.Dialers),
+		"interval": interval.String(),
+	}).Warn("no alive dialer in group; trying the preferred node anyway (rate-limited)")
 }
 
 func (g *DialerGroup) _select(networkType *dialer.NetworkType, state *dialerGroupSelectionState, policy DialerSelectionPolicy, excluded *dialer.Dialer) (d *dialer.Dialer, latency time.Duration, selectedNetworkType *dialer.NetworkType, err error) {
@@ -344,6 +413,18 @@ func (g *DialerGroup) _select(networkType *dialer.NetworkType, state *dialerGrou
 		for i := range count {
 			a := state.aliveDialerSets[networkTypes[i].Index()]
 			d := a.GetRandExcluded(excluded)
+			if d != nil {
+				selected := preferAlternateSelectionNetworkType(d, &networkTypes[i])
+				return d, 0, selected, nil
+			}
+		}
+		return nil, time.Hour, nil, ErrNoAliveDialer
+
+	case consts.DialerSelectionPolicy_Fallback:
+		networkTypes, count := g.selectionNetworkTypes(networkType, policy)
+		for i := range count {
+			a := state.aliveDialerSets[networkTypes[i].Index()]
+			d := a.GetFirstAlive(excluded)
 			if d != nil {
 				selected := preferAlternateSelectionNetworkType(d, &networkTypes[i])
 				return d, 0, selected, nil
@@ -474,6 +555,7 @@ func (g *DialerGroup) unregisterAliveDialerSets(aliveDialerSets [8]*dialer.Alive
 func policyNeedsAliveState(policy consts.DialerSelectionPolicy) bool {
 	switch policy {
 	case consts.DialerSelectionPolicy_Random,
+		consts.DialerSelectionPolicy_Fallback,
 		consts.DialerSelectionPolicy_MinLastLatency,
 		consts.DialerSelectionPolicy_MinAverage10Latencies,
 		consts.DialerSelectionPolicy_MinMovingAverageLatencies:

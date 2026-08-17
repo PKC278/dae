@@ -63,6 +63,34 @@ func buildTCPLinkLogFields(res *proxyDialResult, dialParam *proxyDialParam, dst 
 	return fields
 }
 
+// logDroppedProxyDial records dial failures that IsIgnorableConnectionError
+// classifies as ignorable. Refused/reset/timeout are routine when a client tears
+// a relay down, but on the dial path they mean the selected node never answered:
+// the connection is dropped, and without this the operator sees nothing at all.
+func (c *ControlPlane) logDroppedProxyDial(res *proxyDialResult, dialParam *proxyDialParam, dst netip.AddrPort, domain string, err error) {
+	if !c.log.IsLevelEnabled(logrus.DebugLevel) {
+		return
+	}
+	fields := logrus.Fields{
+		"ip":      RefineAddrPortToShow(dst),
+		"sniffed": domain,
+		"pname":   ProcessName2String(dialParam.ProcessName[:]),
+	}
+	if res != nil {
+		fields["network"] = res.OrigNetworkType
+		if res.Outbound != nil {
+			fields["outbound"] = res.Outbound.Name
+			fields["policy"] = res.Outbound.GetSelectionPolicy()
+		}
+		if res.Dialer != nil {
+			if p := res.Dialer.Property(); p != nil {
+				fields["dialer"] = p.Name
+			}
+		}
+	}
+	c.log.WithFields(fields).WithError(err).Debug("Dropped connection: proxy dial failed")
+}
+
 // isOffloadGloballyDisabledReason checks if the offload reason is a globally
 // disabled reason (e.g., "eBPF offload disabled due to kernel bug").
 func isOffloadGloballyDisabledReason(reason string) bool {
@@ -280,6 +308,7 @@ func (c *ControlPlane) handleConn(ctx context.Context, lConn net.Conn) (err erro
 			return nil
 		}
 		if daerrors.IsIgnorableConnectionError(err) {
+			c.logDroppedProxyDial(res, dialParam, dst, domain, err)
 			return nil
 		}
 		return fmt.Errorf("failed to dial %v: %w", dst, err)
