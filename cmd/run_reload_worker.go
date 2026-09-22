@@ -83,6 +83,10 @@ func (w *reloadWorker) run() {
 		w.reloadManager.beginRuntimeReload(req)
 		reloadStartedAt := req.requestedAt
 		reloadStartedAtMono := req.requestedAtMono
+		ruleProviderOpts := ruleProviderBuildOptions{
+			forceDownload: req.forceRuleProviderDownload,
+			ignoreErrors:  req.ignoreRuleProviderErrors,
+		}
 
 		if req.isSuspend {
 			w.log.Infoln("[Reload] Received suspend signal; prepare to suspend")
@@ -243,7 +247,7 @@ func (w *reloadWorker) run() {
 		if stagedHotHandoff {
 			w.log.Infoln("[Reload] Prepare staged same-port handoff")
 			ctx, cancel := context.WithTimeout(context.Background(), reloadPrepareTimeout)
-			newC, prepareErr := newPreparedControlPlane(ctx, w.log, reloadBpf, dnsCache, newConf, w.externGeoDataDirs, dnsConfigUnchanged, true)
+			newC, prepareErr := newPreparedControlPlane(ctx, w.log, reloadBpf, dnsCache, newConf, w.externGeoDataDirs, dnsConfigUnchanged, true, ruleProviderOpts)
 			prepareErr = attachPreparedSessionManager(newC, w.processSessions, prepareErr)
 			if prepareErr != nil {
 				reloadErr := wrapReloadTimeoutError("prepare staged reload", prepareErr, reloadPrepareTimeout)
@@ -322,7 +326,7 @@ func (w *reloadWorker) run() {
 			freshState, prepareErr := w.c.SnapshotFreshDatapathState()
 			var newC *control.ControlPlane
 			if prepareErr == nil {
-				newC, prepareErr = newPreparedControlPlane(ctx, w.log, freshState, dnsCache, newConf, w.externGeoDataDirs, false, true)
+				newC, prepareErr = newPreparedControlPlane(ctx, w.log, freshState, dnsCache, newConf, w.externGeoDataDirs, false, true, ruleProviderOpts)
 			}
 			prepareErr = attachPreparedSessionManager(newC, w.processSessions, prepareErr)
 			if prepareErr != nil {
@@ -381,7 +385,7 @@ func (w *reloadWorker) run() {
 
 		w.log.Infoln("[Reload] Load new control plane")
 		ctx, cancel := context.WithTimeout(context.Background(), reloadPrepareTimeout)
-		newC, err := newControlPlane(ctx, w.log, reloadBpf, dnsCache, newConf, w.externGeoDataDirs, dnsConfigUnchanged, true)
+		newC, err := newControlPlane(ctx, w.log, reloadBpf, dnsCache, newConf, w.externGeoDataDirs, dnsConfigUnchanged, true, ruleProviderOpts)
 		err = attachPreparedSessionManager(newC, w.processSessions, err)
 
 		var newCancel context.CancelFunc
@@ -399,7 +403,7 @@ func (w *reloadWorker) run() {
 				reloadBpf = nil
 			}
 			ctx, cancel = context.WithTimeout(context.Background(), reloadPrepareTimeout)
-			newC, err = newControlPlane(ctx, w.log, reloadBpf, rollbackDNSCache, w.conf, w.externGeoDataDirs, false, true)
+			newC, err = newControlPlane(ctx, w.log, reloadBpf, rollbackDNSCache, w.conf, w.externGeoDataDirs, false, true, ruleProviderBuildOptions{})
 			err = attachPreparedSessionManager(newC, w.processSessions, err)
 			err = wrapReloadTimeoutError("rollback control plane", err, reloadPrepareTimeout)
 			if err != nil {

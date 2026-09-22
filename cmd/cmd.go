@@ -15,7 +15,8 @@ import (
 )
 
 const (
-	AbortFile = "/var/run/dae.abort"
+	AbortFile             = "/var/run/dae.abort"
+	ForceRuleProviderFile = "/var/run/dae.force-rule-provider"
 )
 
 var (
