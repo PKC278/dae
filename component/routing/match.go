@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/netip"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/daeuniverse/dae/common"
@@ -16,6 +17,7 @@ import (
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/config"
 	"github.com/daeuniverse/dae/pkg/config_parser"
+	dnsmessage "github.com/miekg/dns"
 	"github.com/sirupsen/logrus"
 )
 
@@ -386,8 +388,14 @@ func sourcedParamMatches(param sourcedParam, functionName string, target *config
 		return ipTargetParamMatches(param.param, target)
 	case consts.Function_Port, consts.Function_SourcePort:
 		return portTargetParamMatches(param.param, target)
-	case consts.Function_L4Proto, consts.Function_IpVersion, consts.Function_ProcessName, consts.Function_Dscp, consts.Function_QType, consts.Function_Upstream:
-		return stringTargetParamMatches(param.param, target), nil
+	case consts.Function_L4Proto, consts.Function_IpVersion, consts.Function_Upstream:
+		return exactStringTargetParamMatches(param.param, target), nil
+	case consts.Function_ProcessName:
+		return processNameTargetParamMatches(param.param, target), nil
+	case consts.Function_Dscp:
+		return uintTargetParamMatches(param.param, target, 8)
+	case consts.Function_QType:
+		return qtypeTargetParamMatches(param.param, target)
 	case consts.Function_Mac:
 		return macTargetParamMatches(param.param, target)
 	default:
@@ -463,13 +471,71 @@ func portTargetParamMatches(param *config_parser.Param, target *config_parser.Fu
 	return false, nil
 }
 
-func stringTargetParamMatches(param *config_parser.Param, target *config_parser.Function) bool {
+func exactStringTargetParamMatches(param *config_parser.Param, target *config_parser.Function) bool {
 	for _, targetParam := range target.Params {
-		if strings.EqualFold(param.Val, targetParam.Val) {
+		if param.Val == targetParam.Val {
 			return true
 		}
 	}
 	return false
+}
+
+func processNameTargetParamMatches(param *config_parser.Param, target *config_parser.Function) bool {
+	var ruleName [consts.TaskCommLen]byte
+	copy(ruleName[:], []byte(param.Val))
+	for _, targetParam := range target.Params {
+		var targetName [consts.TaskCommLen]byte
+		copy(targetName[:], []byte(targetParam.Val))
+		if ruleName == targetName {
+			return true
+		}
+	}
+	return false
+}
+
+func uintTargetParamMatches(param *config_parser.Param, target *config_parser.Function, bitSize int) (bool, error) {
+	ruleValue, err := strconv.ParseUint(param.Val, 0, bitSize)
+	if err != nil {
+		return false, err
+	}
+	for _, targetParam := range target.Params {
+		targetValue, err := strconv.ParseUint(targetParam.Val, 0, bitSize)
+		if err != nil {
+			return false, err
+		}
+		if ruleValue == targetValue {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func parseMatchQType(value string) (uint16, error) {
+	if qtype, ok := dnsmessage.StringToType[strings.ToUpper(value)]; ok {
+		return qtype, nil
+	}
+	parsed, err := strconv.ParseUint(value, 0, 16)
+	if err != nil {
+		return 0, fmt.Errorf("unknown DNS request type: %v", value)
+	}
+	return uint16(parsed), nil
+}
+
+func qtypeTargetParamMatches(param *config_parser.Param, target *config_parser.Function) (bool, error) {
+	ruleType, err := parseMatchQType(param.Val)
+	if err != nil {
+		return false, err
+	}
+	for _, targetParam := range target.Params {
+		targetType, err := parseMatchQType(targetParam.Val)
+		if err != nil {
+			return false, err
+		}
+		if ruleType == targetType {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func macTargetParamMatches(param *config_parser.Param, target *config_parser.Function) (bool, error) {
