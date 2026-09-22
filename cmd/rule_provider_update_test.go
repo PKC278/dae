@@ -134,3 +134,45 @@ func TestRuleProviderUpdateScheduleIsImmediateButNotForcedWhenAnyProviderMissing
 		t.Fatalf("schedule forceDownload = true, want false when only one provider is missing")
 	}
 }
+
+func TestRuleProviderUpdateLoopRetriesAfterRejectedReload(t *testing.T) {
+	reloadReqs := make(chan reloadRequest, 1)
+	manager := newReloadManager(reloadReqs, make(chan struct{}, 1), nil)
+	manager.reloadPending.Store(true)
+
+	rejected := make(chan struct{}, 1)
+	oldSetRunSignalProgress := setRunSignalProgress
+	setRunSignalProgress = func(byte, string) error {
+		select {
+		case rejected <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+	t.Cleanup(func() { setRunSignalProgress = oldSetRunSignalProgress })
+
+	loop := startRuleProviderUpdateLoop(newDiscardLogger(), manager, ruleProviderUpdateSchedule{
+		delay:         time.Millisecond,
+		retryDelay:    20 * time.Millisecond,
+		forceDownload: true,
+	})
+	defer loop.Stop()
+
+	select {
+	case <-rejected:
+	case <-time.After(time.Second):
+		t.Fatal("first automatic reload was not rejected")
+	}
+	manager.reloadPending.Store(false)
+
+	select {
+	case req := <-reloadReqs:
+		if !req.forceRuleProviderDownload || !req.ignoreRuleProviderErrors {
+			t.Fatalf("retried reload request = %+v, want forced best-effort update", req)
+		}
+		manager.reloadPending.Store(false)
+		endReloadProxyFailureSuppression()
+	case <-time.After(time.Second):
+		t.Fatal("automatic update did not retry on the next period")
+	}
+}
