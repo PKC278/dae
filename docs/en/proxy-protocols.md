@@ -42,6 +42,8 @@ and keep `global.utls_imitate` at the default `chrome_auto`, or append
 `tlsImplementation=utls&utlsImitate=chrome` to the link query.
 If the provider expects no custom SNI, omit `sni` or keep it explicitly empty.
 
+Append `tfo=true` or `tfo=1` to a TCP node link to enable TCP Fast Open when dae connects to that node's server.
+
 ## External proxy programs
 
 Use external proxy programs to extend protocol support. The following example uses external naiveproxy.

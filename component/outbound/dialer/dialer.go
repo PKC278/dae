@@ -209,9 +209,10 @@ type GlobalOption struct {
 	// It is wired from global.check_dns_tcp, which defaults to true; a
 	// config.Global built literally rather than parsed takes the zero value
 	// and therefore skips them.
-	CheckDnsTcp   bool
-	SoMarkFromDae uint32
-	Mptcp         bool
+	CheckDnsTcp      bool
+	SoMarkFromDae    uint32
+	Mptcp            bool
+	FallbackResolver string
 	// TransportCacheNamespace isolates process-global transport caches
 	// across reload generations so a replacement control plane never reuses
 	// transports bound to the previous generation's dialer lifecycle.
@@ -281,6 +282,7 @@ func NewGlobalOption(global *config.Global, log *logrus.Logger) *GlobalOption {
 		CheckDnsTcp:             global.CheckDnsTcp,
 		SoMarkFromDae:           soMarkFromDae,
 		Mptcp:                   global.Mptcp,
+		FallbackResolver:        global.FallbackResolver,
 		TransportCacheNamespace: newTransportCacheNamespace(),
 	}
 }
