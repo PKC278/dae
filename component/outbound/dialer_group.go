@@ -77,6 +77,11 @@ func NewDialerGroup(
 		checkTolerance:      option.CheckTolerance,
 		aliveChangeCallback: aliveChangeCallback,
 	}
+	// Publish the group as a chain target before its dialers start checking:
+	// a node chained through this group resolves it by name on every dial,
+	// health checks included.
+	option.ChainGroups.Register(name, group.ChainDial)
+
 	state := group.buildSelectionState(p, true)
 	group.registerAliveDialerSets(state.aliveDialerSets)
 	group.selectionState.Store(state)

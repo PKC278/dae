@@ -32,12 +32,25 @@ func NewFromLinkWithProxyCacheContext(ctx context.Context, gOption *GlobalOption
 		proxyCache = NewProxyIpCache()
 	}
 
-	normalizedLink := normalizeShadowTLSPluginOptions(link)
+	nodeLink, chainGroup, err := splitChainGroupHop(link)
+	if err != nil {
+		return nil, err
+	}
+	normalizedLink := normalizeShadowTLSPluginOptions(nodeLink)
 	tfo, err := parseNodeTFO(normalizedLink)
 	if err != nil {
 		return nil, err
 	}
-	baseDialer := newNodeBaseDialer(gOption, tfo)
+	// A chained node never opens a socket of its own: the group it hangs off
+	// carries it, so TCP Fast Open of the first hop belongs to the group's
+	// nodes. dae's socket mark still has to reach whatever the group selects,
+	// including the direct group, or dae captures its own traffic.
+	var baseDialer netproxy.Dialer
+	if chainGroup != "" {
+		baseDialer = newDefaultNetworkDialer(newChainGroupDialer(gOption.ChainGroups, chainGroup), gOption.SoMarkFromDae, gOption.Mptcp)
+	} else {
+		baseDialer = newNodeBaseDialer(gOption, tfo)
+	}
 	scopedBaseDialer := scopeTransportCacheDialer(baseDialer, gOption.TransportCacheNamespace)
 
 	// First, create the protocol dialer with direct dialer to get the property
@@ -65,7 +78,7 @@ func NewFromLinkWithProxyCacheContext(ctx context.Context, gOption *GlobalOption
 		baseDialer, err = gOption.DaeDNS.WrapNodeDialer(baseDialer, daedns.NodeMeta{
 			SubscriptionTag: subscriptionTag,
 			Name:            p.Name,
-			Link:            normalizedLink,
+			Link:            appendChainGroupHop(normalizedLink, chainGroup),
 			AddressHost:     proxyHost,
 		})
 		if err != nil {
@@ -121,6 +134,11 @@ func NewFromLinkWithProxyCacheContext(ctx context.Context, gOption *GlobalOption
 			gOption.Log.WithField("proxy_address", p.Address).Debug("[DialerRegister] Proxy is IP address - no sticky IP caching needed")
 		}
 	}
+
+	// The stored link is what a clone is rebuilt from, so it keeps the group
+	// hop that was stripped before the protocol parsers saw the link.
+	p.ChainGroup = chainGroup
+	p.Link = appendChainGroupHop(p.Link, chainGroup)
 
 	daeDialer := NewDialerContext(ctx, d, gOption, iOption, &p)
 	d = nil
