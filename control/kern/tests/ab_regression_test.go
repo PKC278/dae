@@ -323,10 +323,16 @@ func TestABLanIngressLocalServiceBypass(t *testing.T) {
 			program: obj.TestAbLanIngressUdp6DnsLocalPktgen, wantStatus: tcActRedirect,
 		},
 		{
-			name:    "a user block rule applies to a wildcard-bound local service",
+			name:    "a user block rule hands a wildcard-bound local service to the control plane",
 			bind:    fmt.Sprintf("0.0.0.0:%d", servicePort),
 			program: obj.TestAbLanIngressUdpBlockRulePktgen,
-			runner:  obj.TestAbLanIngressUdpLocalServiceBlockRunner, wantStatus: tcActShot,
+			runner:  obj.TestAbLanIngressUdpLocalServiceBlockRunner, wantStatus: tcActRedirect,
+		},
+		{
+			name:    "a user block(drop) rule discards a wildcard-bound local service",
+			bind:    fmt.Sprintf("0.0.0.0:%d", servicePort),
+			program: obj.TestAbLanIngressUdpBlockDropRulePktgen,
+			runner:  obj.TestAbLanIngressUdpLocalServiceBlockDropRunner, wantStatus: tcActShot,
 		},
 		{
 			name:    "a user block rule does not apply to a service bound to the destination address",

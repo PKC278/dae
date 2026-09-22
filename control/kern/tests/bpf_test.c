@@ -1020,7 +1020,7 @@ int testsetup_tcp_pure_syn_preserves_live_state(struct __sk_buff *skb)
 	 * liveness must still be refreshed. */
 	cur_state = mark_tcp_seen(&key, &tcph, false, &outbound, &mark, &must,
 				  NULL, 0, NULL, 0,
-				  routing_epoch_slot_encode(0));
+				  routing_epoch_slot_encode(0), NULL);
 	if (!cur_state || !cur_state->meta.data.has_routing ||
 	    cur_state->state != TCP_STATE_ACTIVE)
 		return TC_ACT_SHOT;
@@ -1045,7 +1045,7 @@ int testsetup_tcp_pure_syn_preserves_live_state(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	cur_state = mark_tcp_seen(&key, &tcph, false,
 				  NULL, NULL, NULL, NULL,
-				  0, NULL, 0, ROUTING_EPOCH_SLOT_UNKNOWN);
+				  0, NULL, 0, ROUTING_EPOCH_SLOT_UNKNOWN, NULL);
 	if (!cur_state)
 		return TC_ACT_SHOT;
 	if (ab_read_stat(BPF_STATS_SYN_REBIND_REJECTED) != before + 1)
@@ -1072,7 +1072,7 @@ int testsetup_tcp_pure_syn_preserves_live_state(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	cur_state = mark_tcp_seen(&key, &tcph, false,
 				  NULL, NULL, NULL, NULL,
-				  0, NULL, 0, ROUTING_EPOCH_SLOT_UNKNOWN);
+				  0, NULL, 0, ROUTING_EPOCH_SLOT_UNKNOWN, NULL);
 	if (cur_state && cur_state->meta.data.has_routing)
 		return TC_ACT_SHOT;
 	if (ab_read_stat(BPF_STATS_REBIND_REROUTED_AFTER_EPOCH_CHANGE) !=
@@ -1788,7 +1788,7 @@ int testsetup_wan_egress_direct_mark_reroute(struct __sk_buff *skb)
 
 	if (!mark_tcp_seen(&key, &tcph, false,
 			   &outbound, &mark, &must, NULL,
-			   0, NULL, 0, ROUTING_EPOCH_SLOT_UNKNOWN))
+			   0, NULL, 0, ROUTING_EPOCH_SLOT_UNKNOWN, NULL))
 		return TC_ACT_SHOT;
 
 	return TC_ACT_OK;
@@ -1828,9 +1828,9 @@ int testsetup_conntrack_args_scratch_reset(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 
 	conntrack_args_set(args, &outbound, &mark, &must, NULL, 11, pname, 99,
-			   ROUTING_EPOCH_SLOT_UNKNOWN);
+			   ROUTING_EPOCH_SLOT_UNKNOWN, NULL);
 	conntrack_args_set(args, NULL, NULL, NULL, NULL, 0, NULL, 0,
-			   ROUTING_EPOCH_SLOT_UNKNOWN);
+			   ROUTING_EPOCH_SLOT_UNKNOWN, NULL);
 
 	if (args->flags != 0) {
 		bpf_printk("args->flags(%u) != 0\n", args->flags);
@@ -2745,6 +2745,16 @@ int test_ab_lan_ingress_udp_block_rule_pktgen(struct __sk_buff *skb)
 					       AB_TEST_SERVICE_UDP_PORT, 0);
 }
 
+/* A distinct source port, so the block(drop) case routes afresh instead of
+ * reusing the conn-state the plain-block case just cached for the same tuple. */
+SEC("tc/ab_test/lan_ingress_udp_block_drop_rule_pktgen")
+int test_ab_lan_ingress_udp_block_drop_rule_pktgen(struct __sk_buff *skb)
+{
+	return set_ipv4_udp_fastpath_with_dscp(skb, AB_TEST_LAN_SADDR,
+					       AB_TEST_SERVICE_ADDR, 25017,
+					       AB_TEST_SERVICE_UDP_PORT, 0);
+}
+
 SEC("tc/ab_test/lan_ingress_udp_no_listener_pktgen")
 int test_ab_lan_ingress_udp_no_listener_pktgen(struct __sk_buff *skb)
 {
@@ -2789,6 +2799,15 @@ SEC("tc/ab_test/lan_ingress_udp_local_service_block_runner")
 int test_ab_lan_ingress_udp_local_service_block_runner(struct __sk_buff *skb)
 {
 	set_routing_fallback(OUTBOUND_BLOCK, true);
+	return do_tproxy_lan_ingress(skb, ETH_HLEN);
+}
+
+/* Same runner, but the block rule carries the drop param: `-> block(drop)` is
+ * the only form the datapath discards on its own. */
+SEC("tc/ab_test/lan_ingress_udp_local_service_block_drop_runner")
+int test_ab_lan_ingress_udp_local_service_block_drop_runner(struct __sk_buff *skb)
+{
+	set_routing_fallback_with_drop(OUTBOUND_BLOCK, true, true);
 	return do_tproxy_lan_ingress(skb, ETH_HLEN);
 }
 
@@ -3083,9 +3102,9 @@ ab_mark_syn(struct tuples_key *key, bool with_routing, __u8 outbound,
 	if (!with_routing)
 		return mark_tcp_seen(key, &tcp, false, NULL, NULL, NULL, NULL,
 				     0, NULL, 0,
-				     ROUTING_EPOCH_SLOT_UNKNOWN) ? 0 : 1;
+				     ROUTING_EPOCH_SLOT_UNKNOWN, NULL) ? 0 : 1;
 	return mark_tcp_seen(key, &tcp, false, &out, &mk, &must, NULL, 0, NULL,
-			     0, syn_epoch_slot) ? 0 : 1;
+			     0, syn_epoch_slot, NULL) ? 0 : 1;
 }
 
 /*: a same-tuple pure SYN must not rewrite a live ACTIVE flow's routing
@@ -3509,24 +3528,49 @@ static __always_inline bool ab_rate_slot_is_untouched(__u32 key)
  * emit shared one 1s budget across every affected flow, so the normal steady
  * state (what every pre-existing flow does after a restart) produced one
  * warning per second for as long as the flows lived. Its upper bound is 0. */
+/* ab_burst_ctx carries the packet and the first failure out of a bpf_loop
+ * callback. The burst runs through bpf_loop rather than an unrolled C loop
+ * because the verifier walks a full copy of the LAN-ingress role per unrolled
+ * iteration, which leaves this program within a few percent of the
+ * 1M-instruction limit before any datapath change. bpf_loop verifies the body
+ * once while still running every packet.
+ */
+struct ab_burst_ctx {
+	struct __sk_buff *skb;
+	int status;
+};
+
+static __noinline long ab_stateless_tcp_burst_cb(__u32 index, void *raw)
+{
+	struct ab_burst_ctx *ctx = raw;
+
+	if (ab_build_ipv4_tcp(ctx->skb, IPV4(192, 168, 1, 1),
+			      IPV4(5, 5, 5, 5), 33333, 443, 5, TCPH_ACK, 0)) {
+		ctx->status = 2;
+		return 1;
+	}
+	if (do_tproxy_lan_ingress(ctx->skb, ETH_HLEN) != TC_ACT_OK) {
+		ctx->status = 3;
+		return 1;
+	}
+	return 0;
+}
+
 SEC("tc/ab_test/stateless_tcp_passthrough")
 int test_ab_stateless_tcp_passthrough(struct __sk_buff *skb)
 {
 	__u32 key = EVENT_RATE.stateless_tcp_key;
+	struct ab_burst_ctx burst = { .skb = skb };
 	__u64 before;
-	int i;
 
 	if (!ab_rate_slot_armed_at_zero(key))
 		return 1;
 
 	before = ab_read_stat(BPF_STATS_STATELESS_TCP_PASSTHROUGH);
-	for (i = 0; i < AB_PASSTHROUGH_BURST_PACKETS; i++) {
-		if (ab_build_ipv4_tcp(skb, IPV4(192, 168, 1, 1),
-				      IPV4(5, 5, 5, 5), 33333, 443, 5, TCPH_ACK, 0))
-			return 2;
-		if (do_tproxy_lan_ingress(skb, ETH_HLEN) != TC_ACT_OK)
-			return 3;
-	}
+	bpf_loop(AB_PASSTHROUGH_BURST_PACKETS, ab_stateless_tcp_burst_cb,
+		 &burst, 0);
+	if (burst.status)
+		return burst.status;
 	/* Counter exactness: one increment per packet, no more and no less. */
 	if (ab_read_stat(BPF_STATS_STATELESS_TCP_PASSTHROUGH) !=
 	    before + AB_PASSTHROUGH_BURST_PACKETS)
@@ -3591,25 +3635,37 @@ int test_ab_unsolicited_udp_wan_ingress(struct __sk_buff *skb)
  * no per-event emission: forwarding it is the intended policy, and the tuple
  * such an event could carry has no L4 header to read (the parser returns
  * before L4 parsing), so it reported scratch ports rather than wire data. */
+static __noinline long ab_frag_tail_burst_cb(__u32 index, void *raw)
+{
+	struct ab_burst_ctx *ctx = raw;
+
+	/* Fragment offset 1 (8 bytes): non-initial. */
+	if (ab_build_ipv4_udp(ctx->skb, IPV4(192, 168, 2, 1),
+			      IPV4(9, 9, 9, 9), 34567, 4500, 1)) {
+		ctx->status = 2;
+		return 1;
+	}
+	if (do_tproxy_lan_ingress(ctx->skb, ETH_HLEN) != TC_ACT_OK) {
+		ctx->status = 3;
+		return 1;
+	}
+	return 0;
+}
+
 SEC("tc/ab_test/frag_tail_passthrough")
 int test_ab_frag_tail_passthrough(struct __sk_buff *skb)
 {
 	__u32 key = EVENT_RATE.frag_tail_key;
+	struct ab_burst_ctx burst = { .skb = skb };
 	__u64 before;
-	int i;
 
 	if (!ab_rate_slot_armed_at_zero(key))
 		return 1;
 
 	before = ab_read_stat(BPF_STATS_FRAG_TAIL_PASSED);
-	for (i = 0; i < AB_PASSTHROUGH_BURST_PACKETS; i++) {
-		/* Fragment offset 1 (8 bytes): non-initial. */
-		if (ab_build_ipv4_udp(skb, IPV4(192, 168, 2, 1),
-				      IPV4(9, 9, 9, 9), 34567, 4500, 1))
-			return 2;
-		if (do_tproxy_lan_ingress(skb, ETH_HLEN) != TC_ACT_OK)
-			return 3;
-	}
+	bpf_loop(AB_PASSTHROUGH_BURST_PACKETS, ab_frag_tail_burst_cb, &burst, 0);
+	if (burst.status)
+		return burst.status;
 	if (ab_read_stat(BPF_STATS_FRAG_TAIL_PASSED) !=
 	    before + AB_PASSTHROUGH_BURST_PACKETS)
 		return 4;
@@ -3714,11 +3770,11 @@ int test_ab_udp_refresh_bypasses_routing_args(struct __sk_buff *skb)
 	if (!args)
 		return 1;
 	conntrack_args_set(args, &outbound, &mark, &must, NULL, 0, NULL, 0,
-			   ROUTING_EPOCH_SLOT_UNKNOWN);
+			   ROUTING_EPOCH_SLOT_UNKNOWN, NULL);
 
 	state = mark_udp_seen_with_status(&key, false, NULL, NULL, NULL, NULL,
 					  0, NULL, 0, ROUTING_EPOCH_SLOT_UNKNOWN,
-					  &status);
+					  NULL, &status);
 	if (!state || status != UDP_CONN_STATE_STATUS_CREATED)
 		return 2;
 	if (state->meta.data.has_routing || state->meta.data.outbound ||

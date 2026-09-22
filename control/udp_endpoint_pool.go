@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/daeuniverse/dae/common/consts"
+	commonerrors "github.com/daeuniverse/dae/common/errors"
 	"github.com/daeuniverse/dae/component/outbound"
 	"github.com/daeuniverse/dae/component/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
@@ -664,6 +665,9 @@ func (p *UdpEndpointPool) createEndpointLocked(key UdpEndpointKey, createOption 
 	}
 	udpConn, err := dialOption.Dialer.DialContext(ctx, dialOption.Network, dialOption.Target)
 	if err != nil {
+		if isUdpBlockDialCreateError(dialOption, err) {
+			return nil, errBlockReject
+		}
 		reportUdpEndpointDialCreateFailure(key, dialOption, err)
 		if shouldForceMarkUnavailableOnProxyDialError(err) {
 			// Use a fresh timeout context for the retry to avoid inheriting a
@@ -769,6 +773,14 @@ dialSuccess:
 		go ue.startReadLoop()
 	}
 	return ue, nil
+}
+
+func isUdpBlockDialCreateError(dialOption *DialOption, err error) bool {
+	return err != nil &&
+		dialOption != nil &&
+		dialOption.Outbound != nil &&
+		dialOption.Outbound.Name == consts.OutboundBlock.String() &&
+		commonerrors.IsClosedConnection(err)
 }
 
 func reportUdpEndpointDialCreateFailure(key UdpEndpointKey, dialOption *DialOption, err error) {

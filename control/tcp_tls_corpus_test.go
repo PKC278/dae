@@ -111,7 +111,7 @@ func replayPhase0TCPTLSCorpusFixture(t *testing.T, fixture phase0TCPTLSCorpusFix
 	src := netip.MustParseAddrPort("192.0.2.10:41000")
 	dst := netip.MustParseAddrPort("198.51.100.20:443")
 	routingResult := &bpfRoutingResult{Outbound: uint8(consts.OutboundControlPlaneRouting)}
-	outbound, mark, must, err := cp.Route(src, dst, domain, consts.L4ProtoType_TCP, routingResult)
+	outbound, mark, must, _, err := cp.Route(src, dst, domain, consts.L4ProtoType_TCP, routingResult)
 	if err != nil {
 		t.Fatalf("Route() error = %v", err)
 	}

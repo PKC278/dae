@@ -1117,15 +1117,22 @@ check_routing_ipv4_tcp(struct __sk_buff *skb,
 }
 
 static __always_inline void
-set_routing_fallback(__u8 outbound, bool must)
+set_routing_fallback_with_drop(__u8 outbound, bool must, bool drop)
 {
 	struct match_set ms = {};
 	ms.not = false;
 	ms.type = MatchType_Fallback;
 	ms.outbound = outbound;
 	ms.must = must;
+	ms.drop = drop;
 	ms.mark = 0;
 	bpf_map_update_elem(&routing_map, &one_key, &ms, BPF_ANY);
+}
+
+static __always_inline void
+set_routing_fallback(__u8 outbound, bool must)
+{
+	set_routing_fallback_with_drop(outbound, must, false);
 }
 
 // BUG-002 test helper: Create a minimal IPv4 UDP packet (42 bytes total)
