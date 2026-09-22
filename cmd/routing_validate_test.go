@@ -36,7 +36,7 @@ func TestValidateRoutingRulesRejectsUnknownOperands(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %q: %v", rule, err)
 		}
-		err = validateRoutingRules(log, conf, nil)
+		err = validateRoutingRules(log, conf, nil, "")
 		if err == nil {
 			t.Errorf("validate accepted %q; it must be reported as an invalid rule", rule)
 			continue
@@ -49,7 +49,7 @@ func TestValidateRoutingRulesRejectsUnknownOperands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse supported rule: %v", err)
 	}
-	if err := validateRoutingRules(log, conf, nil); err != nil {
+	if err := validateRoutingRules(log, conf, nil, ""); err != nil {
 		t.Errorf("supported rule must validate, got %v", err)
 	}
 }
