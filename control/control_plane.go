@@ -643,9 +643,6 @@ func NewControlPlaneWithContextOptions(
 		return nil, err
 	}
 	sniffingTimeout := global.SniffingTimeout
-	if dialMode == consts.DialMode_Ip {
-		sniffingTimeout = 0
-	}
 	disableKernelAliveCallback := dialMode != consts.DialMode_Ip
 	_direct, directProperty := dialer.NewDirectDialer(option, true)
 	direct := dialer.NewDialerContext(context.Background(), _direct, option, dialer.InstanceOption{DisableCheck: true}, directProperty)
@@ -822,6 +819,7 @@ func NewControlPlaneWithContextOptions(
 	if err != nil {
 		return nil, fmt.Errorf("RoutingMatcherBuilder.BuildUserspace: %w", err)
 	}
+	core.setDomainRoutingDecisionFn(routingMatcher.domainRoutingDecisionFromBitmap)
 
 	// Get referenced outbounds to limit health checks.
 	referencedOutbounds := builder.GetReferencedOutbounds()
@@ -1293,14 +1291,16 @@ func (c *ControlPlane) dnsControllerOption() *DnsControllerOption {
 			return c.routingMatcher.domainMatcher.MatchDomainBitmap(cache.GetFqdn())
 		},
 		NewCache: func(fqdn string, answers, ns, extra []dnsmessage.RR, deadline time.Time, originalDeadline time.Time) (cache *DnsCache, err error) {
+			domainBitmap, domainDecision := c.routingMatcher.DomainRoutingDecision(fqdn)
 			return &DnsCache{
-				RouteProjectionEpoch: routeProjectionEpoch,
-				DomainBitmap:         c.routingMatcher.domainMatcher.MatchDomainBitmap(fqdn),
-				NS:                   ns,
-				Extra:                extra,
-				Answer:               answers,
-				Deadline:             deadline,
-				OriginalDeadline:     originalDeadline,
+				RouteProjectionEpoch:  routeProjectionEpoch,
+				DomainBitmap:          domainBitmap,
+				DomainRoutingDecision: domainDecision,
+				NS:                    ns,
+				Extra:                 extra,
+				Answer:                answers,
+				Deadline:              deadline,
+				OriginalDeadline:      originalDeadline,
 			}, nil
 		},
 		BestDialerChooser: c.chooseBestDnsDialerSnapshot,

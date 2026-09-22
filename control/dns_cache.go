@@ -39,14 +39,15 @@ type dnsPackedResponse struct {
 }
 
 type DnsCache struct {
-	RouteOwnerKey        string
-	RouteProjectionEpoch uint64
-	DomainBitmap         []uint32
-	Answer               []dnsmessage.RR
-	NS                   []dnsmessage.RR
-	Extra                []dnsmessage.RR
-	Deadline             time.Time
-	OriginalDeadline     time.Time // This field is not impacted by `fixed_domain_ttl`.
+	RouteOwnerKey         string
+	RouteProjectionEpoch  uint64
+	DomainBitmap          []uint32
+	DomainRoutingDecision domainRoutingDecision
+	Answer                []dnsmessage.RR
+	NS                    []dnsmessage.RR
+	Extra                 []dnsmessage.RR
+	Deadline              time.Time
+	OriginalDeadline      time.Time // This field is not impacted by `fixed_domain_ttl`.
 
 	// lastRouteSyncNano tracks when route binding was last synced to BPF.
 	lastRouteSyncNano atomic.Int64
@@ -131,8 +132,26 @@ func (c *DnsCache) ComputeBpfDataHash() uint64 {
 		hash ^= uint64(v)
 		hash *= 1099511628211
 	}
+	decisionParts := []uint64{
+		boolHash(c.DomainRoutingDecision.Valid),
+		uint64(c.DomainRoutingDecision.Outbound),
+		uint64(c.DomainRoutingDecision.Mark),
+		boolHash(c.DomainRoutingDecision.Must),
+		boolHash(c.DomainRoutingDecision.Drop),
+	}
+	for _, v := range decisionParts {
+		hash ^= v
+		hash *= 1099511628211
+	}
 
 	return hash
+}
+
+func boolHash(v bool) uint64 {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 // NeedsBpfUpdate checks if BPF map update is needed using differential detection.
@@ -201,13 +220,14 @@ func (c *DnsCache) MarkBpfUpdated(now time.Time) {
 // matcher and lifecycle bookkeeping.
 func (c *DnsCache) CloneForReload() *DnsCache {
 	newCache := &DnsCache{
-		RouteOwnerKey:        c.RouteOwnerKey,
-		RouteProjectionEpoch: c.RouteProjectionEpoch,
-		Answer:               c.Answer,
-		NS:                   c.NS,
-		Extra:                c.Extra,
-		Deadline:             c.Deadline,
-		OriginalDeadline:     c.OriginalDeadline,
+		RouteOwnerKey:         c.RouteOwnerKey,
+		RouteProjectionEpoch:  c.RouteProjectionEpoch,
+		DomainRoutingDecision: c.DomainRoutingDecision,
+		Answer:                c.Answer,
+		NS:                    c.NS,
+		Extra:                 c.Extra,
+		Deadline:              c.Deadline,
+		OriginalDeadline:      c.OriginalDeadline,
 	}
 
 	if packed := c.packedResponse.Load(); packed != nil && packed.wire != nil {

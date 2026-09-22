@@ -608,14 +608,17 @@ func (c *ControlPlane) handlePktOwned(data []byte, src, realDst netip.AddrPort, 
 	now := time.Now()
 	nowNano := now.UnixNano()
 	realSrc = src
-	if routingResult.Drop != 0 {
+	if shouldDropUdpBeforeSniff(routingResult) {
 		return nil
 	}
+	isQuicInitial := flowDecision.IsQuicInitial
 	routeScope := udpEndpointRouteScope{}
+	routeScopeReady := false
 	forceSymmetricKey := false
 	if c.udpRouteScopeSensitive {
 		routeScope = newUdpEndpointRouteScope(routingResult)
 		forceSymmetricKey = udpRouteScopeNeedsDestinationAffinity(routingResult)
+		routeScopeReady = true
 	}
 
 	// DNS to port 53 never reaches this point in production: the ingress
@@ -636,7 +639,6 @@ func (c *ControlPlane) handlePktOwned(data []byte, src, realDst netip.AddrPort, 
 	// This avoids double sync.Map lookups by pre-selecting the appropriate key:
 	// - Symmetric NAT (Src+Dst) for confirmed QUIC/sniffing sessions on sniff-eligible UDP
 	// - Full-Cone NAT (Src-only) for other UDP traffic
-	isQuicInitial := flowDecision.IsQuicInitial
 	var quicSnifferKey PacketSnifferKey
 	failedQuicDcidKnown := false
 	if isQuicInitial {
@@ -684,11 +686,11 @@ func (c *ControlPlane) handlePktOwned(data []byte, src, realDst netip.AddrPort, 
 				}
 			}
 		}
-	}
-	if !ueExists {
-		if fallbackKey, ok := flowDecision.InitialLookupFallbackKeyWithScope(routeScope, forceSymmetricKey); ok {
-			ueKey = fallbackKey
-			ue, ueExists = DefaultUdpEndpointPool.Get(ueKey)
+		if !ueExists {
+			if fallbackKey, ok := flowDecision.InitialLookupFallbackKeyWithScope(routeScope, forceSymmetricKey); ok {
+				ueKey = fallbackKey
+				ue, ueExists = DefaultUdpEndpointPool.Get(ueKey)
+			}
 		}
 	}
 	if ueExists {
@@ -944,6 +946,10 @@ func (c *ControlPlane) handlePktOwned(data []byte, src, realDst netip.AddrPort, 
 	}
 
 afterSniffing:
+	if c.udpRouteScopeSensitive && !routeScopeReady {
+		routeScope = newUdpEndpointRouteScope(routingResult)
+		forceSymmetricKey = udpRouteScopeNeedsDestinationAffinity(routingResult)
+	}
 	if routingResult.Mark == 0 {
 		routingResult.Mark = c.soMarkFromDae
 	}
@@ -1229,6 +1235,10 @@ getNew:
 	}
 
 	return nil
+}
+
+func shouldDropUdpBeforeSniff(routingResult *bpfRoutingResult) bool {
+	return routingResult != nil && routingResult.Drop != 0
 }
 
 func (c *ControlPlane) shouldPenalizeUdpEndpointWriteError(err error) bool {
