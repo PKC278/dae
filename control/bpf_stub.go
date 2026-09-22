@@ -42,8 +42,10 @@ type bpfDaeParam struct {
 }
 
 type bpfDomainRouting struct {
-	_      structs.HostLayout
-	Bitmap [32]uint32
+	_         structs.HostLayout
+	Bitmap    [32]uint32
+	Ambiguous uint8
+	_         [3]byte
 }
 
 type bpfRoutingEpochIp struct {
