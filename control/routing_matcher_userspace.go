@@ -91,6 +91,7 @@ type compiledRoutingMatch struct {
 	not       bool
 	mark      uint32
 	must      bool
+	drop      bool
 
 	lpmIndex  uint32
 	portStart uint16
@@ -107,6 +108,7 @@ func compileRoutingMatch(match bpfMatchSet) (compiledRoutingMatch, error) {
 		not:       match.Not != 0,
 		mark:      match.Mark,
 		must:      match.Must != 0,
+		drop:      match.Drop != 0,
 	}
 
 	switch compiled.matchType {
@@ -246,6 +248,36 @@ func (m *RoutingMatcher) Match(
 	dscp uint8,
 	mac [16]uint8,
 ) (outboundIndex consts.OutboundIndex, mark uint32, must bool, err error) {
+	outboundIndex, mark, must, _, err = m.MatchWithDrop(
+		sourceAddr,
+		destAddr,
+		sourcePort,
+		destPort,
+		ipVersion,
+		l4proto,
+		domain,
+		processName,
+		dscp,
+		mac,
+	)
+	return
+}
+
+// MatchWithDrop also reports whether the matched rule asked for the packet to
+// be discarded silently rather than rejected.
+// Match is modified from kern/tproxy.c; please keep sync.
+func (m *RoutingMatcher) MatchWithDrop(
+	sourceAddr [16]uint8,
+	destAddr [16]uint8,
+	sourcePort uint16,
+	destPort uint16,
+	ipVersion consts.IpVersionType,
+	l4proto consts.L4ProtoType,
+	domain string,
+	processName [16]uint8,
+	dscp uint8,
+	mac [16]uint8,
+) (outboundIndex consts.OutboundIndex, mark uint32, must bool, drop bool, err error) {
 	facts, err := m.newFacts(
 		sourceAddr,
 		destAddr,
@@ -259,12 +291,12 @@ func (m *RoutingMatcher) Match(
 		mac,
 	)
 	if err != nil {
-		return 0, 0, false, err
+		return 0, 0, false, false, err
 	}
 
 	matches := m.compiledMatches
 	if len(matches) == 0 {
-		return 0, 0, false, fmt.Errorf("no compiled routing match set")
+		return 0, 0, false, false, fmt.Errorf("no compiled routing match set")
 	}
 
 	goodSubrule := false
@@ -273,7 +305,7 @@ func (m *RoutingMatcher) Match(
 		if !badRule && !goodSubrule {
 			matched, matchErr := m.matchCompiledMatch(i, match, &facts)
 			if matchErr != nil {
-				return 0, 0, false, matchErr
+				return 0, 0, false, false, matchErr
 			}
 			if matched {
 				goodSubrule = true
@@ -311,10 +343,10 @@ func (m *RoutingMatcher) Match(
 					badRule = false
 					continue
 				}
-				return outbound, match.mark, match.must || must, nil
+				return outbound, match.mark, match.must || must, match.drop, nil
 			}
 			badRule = false
 		}
 	}
-	return 0, 0, false, fmt.Errorf("no match set hit")
+	return 0, 0, false, false, fmt.Errorf("no match set hit")
 }

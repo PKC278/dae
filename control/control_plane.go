@@ -2864,7 +2864,7 @@ func (c *ControlPlane) chooseBestDnsDialerSnapshot(
 			default:
 				return nil, fmt.Errorf("unexpected ipversion: %v", ver)
 			}
-			outboundIndex, mark, _, err := c.Route(
+			outboundIndex, mark, _, drop, err := c.Route(
 				snapshot.RealSrc,
 				netip.AddrPortFrom(dAddr, dnsUpstream.Port),
 				dnsUpstream.Hostname,
@@ -2873,6 +2873,9 @@ func (c *ControlPlane) chooseBestDnsDialerSnapshot(
 			)
 			if err != nil {
 				return nil, err
+			}
+			if drop {
+				return nil, errBlockDrop
 			}
 			if mark == 0 {
 				mark = c.soMarkFromDae

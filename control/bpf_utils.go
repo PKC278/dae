@@ -61,6 +61,7 @@ type bpfRoutingResult struct {
 	Pname              [16]uint8
 	Pid                uint32
 	Dscp               uint8
+	Drop               uint8
 	RoutingEpochSlot   uint8
 	DatapathGeneration uint16
 }
@@ -385,6 +386,7 @@ type bpfDataplaneMaps struct {
 	RedirectTrack            *ebpf.Map `ebpf:"redirect_track"`
 	RouteCtxScratchMap       *ebpf.Map `ebpf:"route_ctx_scratch_map"`
 	RoutingHandoffMap        *ebpf.Map `ebpf:"routing_handoff_map"`
+	RoutingHandoffScratchMap *ebpf.Map `ebpf:"routing_handoff_scratch_map"`
 	RoutingMap               *ebpf.Map `ebpf:"routing_map"`
 	RoutingMetaMap           *ebpf.Map `ebpf:"routing_meta_map"`
 	UnusedLpmType            *ebpf.Map `ebpf:"unused_lpm_type"`
@@ -804,6 +806,7 @@ func assignDataplaneToBpf(bpf *bpfObjects, dp *bpfDataplane) {
 	bpf.RedirectTrack = dp.RedirectTrack
 	bpf.RouteCtxScratchMap = dp.RouteCtxScratchMap
 	bpf.RoutingHandoffMap = dp.RoutingHandoffMap
+	bpf.RoutingHandoffScratchMap = dp.RoutingHandoffScratchMap
 	bpf.RoutingMap = dp.RoutingMap
 	bpf.RoutingMetaMap = dp.RoutingMetaMap
 	bpf.UnusedLpmType = dp.UnusedLpmType
