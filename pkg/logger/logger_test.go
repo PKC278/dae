@@ -25,13 +25,13 @@ func newTestLogger(level string) (*logrus.Logger, *bytes.Buffer) {
 func TestMilestoneVisibleAtErrorLevel(t *testing.T) {
 	log, buf := newTestLogger("error")
 	log.Infoln("suppressed info line")
-	Milestone(log, "dae is now proxying traffic (tproxy port %v)", 12345)
+	Milestone(log, "dae is now proxying traffic (ready in %v)", "4.2s")
 
 	out := buf.String()
 	if strings.Contains(out, "suppressed info line") {
 		t.Fatalf("info line should have been filtered at error level, got: %q", out)
 	}
-	if !strings.Contains(out, "dae is now proxying traffic (tproxy port 12345)") {
+	if !strings.Contains(out, "dae is now proxying traffic (ready in 4.2s)") {
 		t.Fatalf("milestone should be emitted at error level, got: %q", out)
 	}
 }
