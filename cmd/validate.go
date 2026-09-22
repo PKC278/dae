@@ -39,7 +39,10 @@ var (
 			// Dry-run the rule validation the run path performs, so an illegal
 			// rule set fails here (non-zero) instead of at daemon startup.
 			log := logrus.New()
-			if err := validateRoutingRules(log, conf, []string{filepath.Dir(cfgFile)}); err != nil {
+			// Same layout the run path derives, so a cached rule set validates
+			// against the very bytes the daemon would load.
+			ruleProviderDir := filepath.Join(filepath.Dir(cfgFile), "rules")
+			if err := validateRoutingRules(log, conf, []string{filepath.Dir(cfgFile)}, ruleProviderDir); err != nil {
 				fmt.Println(err)
 				os.Exit(1)
 			}
@@ -48,7 +51,12 @@ var (
 			// chain (component/dns), and a typo there used to exit 0 here while
 			// `dae run` refused to start. Same chain, no second copy of the
 			// checks - see dns.ValidateRouting.
-			if err := dns.ValidateRouting(log, &conf.Dns, []string{filepath.Dir(cfgFile)}); err != nil {
+			ruleProviders, err := config.KeyableStringMap(conf.RuleProvider)
+			if err != nil {
+				fmt.Printf("rule_provider: %v\n", err)
+				os.Exit(1)
+			}
+			if err := dns.ValidateRouting(log, &conf.Dns, []string{filepath.Dir(cfgFile)}, ruleProviders, ruleProviderDir); err != nil {
 				fmt.Println(err)
 				os.Exit(1)
 			}
@@ -70,16 +78,32 @@ func init() {
 // registry the run path also uses), then resolves every rule and fallback
 // outbound the way RoutingMatcherBuilder.outboundToId does. The only thing it
 // does not do is touch BPF.
-func validateRoutingRules(log *logrus.Logger, conf *config.Config, externGeoDataDirs []string) error {
+func validateRoutingRules(log *logrus.Logger, conf *config.Config, externGeoDataDirs []string, ruleProviderDir string) error {
 	if conf == nil {
 		return fmt.Errorf("nil config")
 	}
 	if log == nil {
 		log = logrus.New()
 	}
+	// The optimizer resolves `rule-set:` against the declared providers, so it
+	// needs the same pair the run path hands it. Validation stays offline: a
+	// provider that has no cached copy yet is skipped rather than downloaded,
+	// which keeps validate from failing on a cold cache while an operand naming
+	// no declared provider still fails.
+	ruleProviders, err := config.KeyableStringMap(conf.RuleProvider)
+	if err != nil {
+		return fmt.Errorf("rule_provider: %w", err)
+	}
 	program, err := routing.NewNormalizedProgram(conf.Routing.Rules, conf.Routing.Fallback,
 		&routing.AliasOptimizer{},
-		&routing.DatReaderOptimizer{Logger: log, LocationFinder: assets.NewLocationFinder(externGeoDataDirs)},
+		&routing.DatReaderOptimizer{
+			Logger:                       log,
+			LocationFinder:               assets.NewLocationFinder(externGeoDataDirs),
+			RuleProviders:                ruleProviders,
+			RuleProviderDir:              ruleProviderDir,
+			RuleProviderDownloadDisabled: true,
+			SkipUnavailableRuleProviders: true,
+		},
 		&routing.MergeAndSortRulesOptimizer{},
 		&routing.DeduplicateParamsOptimizer{},
 	)
