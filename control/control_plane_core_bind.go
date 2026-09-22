@@ -593,13 +593,15 @@ func (c *controlPlaneCore) _bindWan(ifname string) error {
 	egressPriority := uint16(2)
 	ingressProgram := bpf.TproxyWanIngressL3
 	ingressName := consts.AppName + "_wan_ingress_l3"
-	ingressPriority := uint16(1)
+	// Priority 2 puts dae's WAN ingress behind the NAT filters a router
+	// installs at priority 1, so a reply that belongs to an existing NAT
+	// session is translated before dae sees it.
+	ingressPriority := uint16(2)
 	// See _bindLan: the observer takes priority 1 only when it is on, and both
 	// binds must agree at the shared dual-role hook.
 	dualPriority := uint16(1)
 	if directStatsEnabled.Load() {
 		dualPriority = 2
-		ingressPriority = 2
 	}
 	if c.isDualRoleTCInterface(ifname) {
 		programs := selectDualRoleTCHookPrograms(bpf, linkHdrLen > 0)
