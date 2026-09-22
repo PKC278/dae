@@ -14,7 +14,7 @@ dae supports the following proxy protocols:
 | Juicity | | [Juicity](https://github.com/juicity/juicity?tab=readme-ov-file#link-format) |
 | Hysteria2 | | [Hysteria2](https://v2.hysteria.network/docs/developers/URI-Scheme) |
 | AnyTLS | | [AnyTLS](https://github.com/anytls/anytls-go/blob/main/docs/uri_scheme.md) |
-| Proxy chain (flexible protocol) | | [Proxy chain](https://github.com/daeuniverse/dae/discussions/236) |
+| Proxy chain (flexible protocol) | A hop may also be a group, see [chain proxy through a group](configuration/chain-proxy.md) | [Proxy chain](https://github.com/daeuniverse/dae/discussions/236) |
 
 ## URI examples
 

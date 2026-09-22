@@ -14,7 +14,7 @@ dae 支持以下代理协议：
 | Juicity | — | [Juicity](https://github.com/juicity/juicity?tab=readme-ov-file#link-format) |
 | Hysteria2 | — | [Hysteria2](https://v2.hysteria.network/docs/developers/URI-Scheme) |
 | AnyTLS | — | [AnyTLS](https://github.com/anytls/anytls-go/blob/main/docs/uri_scheme.md) |
-| 代理链（灵活协议） | — | [Proxy chain](https://github.com/daeuniverse/dae/discussions/236) |
+| 代理链（灵活协议） | 其中一跳可以是分组，参阅[通过分组的链式代理](configuration/chain-proxy.md) | [Proxy chain](https://github.com/daeuniverse/dae/discussions/236) |
 
 表中协议均已支持。“—”表示原文未列出细分信息或 URI 参考链接。
 
