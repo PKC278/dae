@@ -15,7 +15,7 @@ var SectionSummaryDesc = Desc{
 	"api":          "Native HTTP control-plane API listener. Disabled by default. A non-loopback listener requires secret (Bearer token); secretless anonymous access is only allowed on loopback with allow_anonymous_loopback enabled.",
 	"routing": `Traffic follows this routing. See https://github.com/daeuniverse/dae/blob/main/docs/en/configuration/routing.md for full examples.
 Notice: domain traffic split will fail if DNS traffic is not taken over by dae.
-Built-in outbound: direct, must_direct, block.
+Built-in outbound: direct, must_direct, block. Use block(drop) to silently drop packets; plain block explicitly rejects the connection.
 Available functions: domain, sip, dip, sport, dport, ipversion, l4proto, pname, mac.
 Available keys in domain function: suffix, keyword, regex, full. No key indicates suffix.
 domain: Match domain.
