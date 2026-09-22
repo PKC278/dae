@@ -34,10 +34,12 @@ func TestNewControlPlaneWithContextOptionsAbortsOnCanceledContext(t *testing.T) 
 		nil,
 		nil,
 		nil,
+		nil,
 		routingA,
 		global,
 		dnsConfig,
 		nil,
+		"",
 		ControlPlaneBuildOptions{},
 	)
 	if err == nil {

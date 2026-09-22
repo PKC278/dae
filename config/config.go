@@ -7,8 +7,10 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/pkg/config_parser"
 )
 
@@ -46,20 +48,21 @@ type Global struct {
 	// later selector -> direct/block fallback) so the whitelist still
 	// applies when the client's DNS bypasses dae. Requires sniffing to be
 	// enabled (sniffing_timeout > 0 and dial_mode != ip).
-	AutoSniffPunt       bool          `mapstructure:"auto_sniff_punt" default:"true"`
-	TlsImplementation   string        `mapstructure:"tls_implementation" default:"tls"`
-	UtlsImitate         string        `mapstructure:"utls_imitate" default:"chrome_auto"`
-	TlsFragment         bool          `mapstructure:"tls_fragment" default:"false"`
-	TlsFragmentLength   string        `mapstructure:"tls_fragment_length" default:"50-100"`
-	TlsFragmentInterval string        `mapstructure:"tls_fragment_interval" default:"10-20"`
-	PprofPort           uint16        `mapstructure:"pprof_port" default:"0"`
-	Mptcp               bool          `mapstructure:"mptcp" default:"false"`
-	BootstrapResolver   string        `mapstructure:"bootstrap_resolver"`
-	FallbackResolver    string        `mapstructure:"fallback_resolver" default:"8.8.8.8:53"`
-	BandwidthMaxTx      string        `mapstructure:"bandwidth_max_tx" default:"0"`
-	BandwidthMaxRx      string        `mapstructure:"bandwidth_max_rx" default:"0"`
-	UDPHopInterval      time.Duration `mapstructure:"udphop_interval" default:"30s"`
-	BpfConnStateMapSize uint32        `mapstructure:"bpf_conn_state_map_size" default:"262144"`
+	AutoSniffPunt              bool          `mapstructure:"auto_sniff_punt" default:"true"`
+	TlsImplementation          string        `mapstructure:"tls_implementation" default:"tls"`
+	UtlsImitate                string        `mapstructure:"utls_imitate" default:"chrome_auto"`
+	TlsFragment                bool          `mapstructure:"tls_fragment" default:"false"`
+	TlsFragmentLength          string        `mapstructure:"tls_fragment_length" default:"50-100"`
+	TlsFragmentInterval        string        `mapstructure:"tls_fragment_interval" default:"10-20"`
+	PprofPort                  uint16        `mapstructure:"pprof_port" default:"0"`
+	Mptcp                      bool          `mapstructure:"mptcp" default:"false"`
+	BootstrapResolver          string        `mapstructure:"bootstrap_resolver"`
+	FallbackResolver           string        `mapstructure:"fallback_resolver" default:"8.8.8.8:53"`
+	BandwidthMaxTx             string        `mapstructure:"bandwidth_max_tx" default:"0"`
+	BandwidthMaxRx             string        `mapstructure:"bandwidth_max_rx" default:"0"`
+	UDPHopInterval             time.Duration `mapstructure:"udphop_interval" default:"30s"`
+	RuleProviderUpdateInterval time.Duration `mapstructure:"rule_provider_update_interval" default:"0"`
+	BpfConnStateMapSize        uint32        `mapstructure:"bpf_conn_state_map_size" default:"262144"`
 }
 
 type FunctionOrString any
@@ -127,6 +130,24 @@ type DnsRouting struct {
 }
 type KeyableString string
 
+func KeyableStringMap(values []KeyableString) (map[string]string, error) {
+	m := make(map[string]string, len(values))
+	for _, value := range values {
+		key, val := common.GetTagFromLinkLikePlaintext(string(value))
+		if key == "" {
+			return nil, fmt.Errorf("missing key in %q", value)
+		}
+		if key == "." || key == ".." || strings.ContainsAny(key, `/\`) {
+			return nil, fmt.Errorf("invalid key %q", key)
+		}
+		if _, ok := m[key]; ok {
+			return nil, fmt.Errorf("duplicated key %q", key)
+		}
+		m[key] = val
+	}
+	return m, nil
+}
+
 // Dns is intentionally mirrored by cmd.dnsConfigFingerprint for staged reload
 // DNS reuse decisions. Only routing-affecting fields are covered by the
 // fingerprint; runtime-tunable parameters (OptimisticCache, OptimisticCacheTtl,
@@ -158,6 +179,7 @@ type Config struct {
 	Subscription []KeyableString `mapstructure:"subscription"`
 	Node         []KeyableString `mapstructure:"node"`
 	Group        []Group         `mapstructure:"group" desc:"GroupDesc"`
+	RuleProvider []KeyableString `mapstructure:"rule_provider"`
 	Routing      Routing         `mapstructure:"routing" required:""`
 	Dns          Dns             `mapstructure:"dns" desc:"DnsDesc"`
 }

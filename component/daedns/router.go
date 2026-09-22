@@ -91,8 +91,40 @@ type lookupCall struct {
 }
 
 type NewOption struct {
-	LocationFinder *assets.LocationFinder
-	DirectDialer   netproxy.Dialer
+	LocationFinder               *assets.LocationFinder
+	DirectDialer                 netproxy.Dialer
+	RuleProviders                map[string]string
+	RuleProviderDir              string
+	RuleProviderDownloadDisabled bool
+	SkipUnavailableRuleProviders bool
+}
+
+func optRuleProviders(opt *NewOption) map[string]string {
+	if opt == nil {
+		return nil
+	}
+	return opt.RuleProviders
+}
+
+func optRuleProviderDir(opt *NewOption) string {
+	if opt == nil {
+		return ""
+	}
+	return opt.RuleProviderDir
+}
+
+func optRuleProviderDownloadDisabled(opt *NewOption) bool {
+	if opt == nil {
+		return false
+	}
+	return opt.RuleProviderDownloadDisabled
+}
+
+func optSkipUnavailableRuleProviders(opt *NewOption) bool {
+	if opt == nil {
+		return false
+	}
+	return opt.SkipUnavailableRuleProviders
 }
 
 type compiledMatcher[T any] struct {
@@ -139,7 +171,14 @@ func NewWithOption(log *logrus.Logger, global *config.Global, dnsCfg *config.Dns
 		}
 	}
 	requestProgram, err := componentdns.NewNormalizedRequestRoutingProgram(dnsCfg.Routing.Request.Rules, dnsCfg.Routing.Request.Fallback,
-		&routing.DatReaderOptimizer{Logger: log, LocationFinder: locationFinder},
+		&routing.DatReaderOptimizer{
+			Logger:                       log,
+			LocationFinder:               locationFinder,
+			RuleProviders:                optRuleProviders(opt),
+			RuleProviderDir:              optRuleProviderDir(opt),
+			RuleProviderDownloadDisabled: optRuleProviderDownloadDisabled(opt),
+			SkipUnavailableRuleProviders: optSkipUnavailableRuleProviders(opt),
+		},
 		&routing.MergeAndSortRulesOptimizer{},
 		&routing.DeduplicateParamsOptimizer{},
 	)
@@ -352,6 +391,24 @@ func (r *Router) WrapSubscriptionDialer(base netproxy.Dialer, rawSubscription st
 		return base, nil
 	}
 	return newResolvingDialer(base, r, upstream, upstream, controlHost), nil
+}
+
+func (r *Router) WrapRuleProviderDialer(base netproxy.Dialer, host string) netproxy.Dialer {
+	if r == nil {
+		return base
+	}
+	if r.requestMatcher == nil && host == "" {
+		return base
+	}
+	return newResolvingDialer(base, r, "", "", host)
+}
+
+func (r *Router) LookupRuleProviderIPAddr(ctx context.Context, network, host string) ([]net.IPAddr, error) {
+	if r == nil {
+		return net.DefaultResolver.LookupIPAddr(ctx, host)
+	}
+	return newResolvingDialer(direct.SymmetricDirect, r, "", "", host).
+		lookupIPAddr(ctx, network, host)
 }
 
 func (r *Router) WrapNodeDialer(base netproxy.Dialer, meta NodeMeta) (netproxy.Dialer, error) {

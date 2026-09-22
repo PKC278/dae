@@ -54,12 +54,20 @@ func listenControlPlaneInDaeNetns(c *control.ControlPlane, port uint16) (*contro
 	return listener, nil
 }
 
-func newControlPlane(ctx context.Context, log *logrus.Logger, bpf any, dnsCache map[string]*control.DnsCache, conf *config.Config, externGeoDataDirs []string, dnsRoutingUnchanged bool, isReloadBuild bool) (c *control.ControlPlane, err error) {
-	return newControlPlaneWithMode(ctx, log, bpf, dnsCache, conf, externGeoDataDirs, false, dnsRoutingUnchanged, isReloadBuild)
+func newControlPlane(ctx context.Context, log *logrus.Logger, bpf any, dnsCache map[string]*control.DnsCache, conf *config.Config, externGeoDataDirs []string, dnsRoutingUnchanged bool, isReloadBuild bool, ruleProviderOpts ruleProviderBuildOptions) (c *control.ControlPlane, err error) {
+	return newControlPlaneWithMode(ctx, log, bpf, dnsCache, conf, externGeoDataDirs, false, dnsRoutingUnchanged, isReloadBuild, ruleProviderOpts)
 }
 
-func newPreparedControlPlane(ctx context.Context, log *logrus.Logger, bpf any, dnsCache map[string]*control.DnsCache, conf *config.Config, externGeoDataDirs []string, dnsRoutingUnchanged bool, isReloadBuild bool) (c *control.ControlPlane, err error) {
-	return newControlPlaneWithMode(ctx, log, bpf, dnsCache, conf, externGeoDataDirs, true, dnsRoutingUnchanged, isReloadBuild)
+func newPreparedControlPlane(ctx context.Context, log *logrus.Logger, bpf any, dnsCache map[string]*control.DnsCache, conf *config.Config, externGeoDataDirs []string, dnsRoutingUnchanged bool, isReloadBuild bool, ruleProviderOpts ruleProviderBuildOptions) (c *control.ControlPlane, err error) {
+	return newControlPlaneWithMode(ctx, log, bpf, dnsCache, conf, externGeoDataDirs, true, dnsRoutingUnchanged, isReloadBuild, ruleProviderOpts)
+}
+
+// ruleProviderBuildOptions carries the rule-provider decisions a reload makes
+// before the control plane exists: whether cached rule sets must be refetched,
+// and whether a provider that cannot be fetched may be skipped.
+type ruleProviderBuildOptions struct {
+	forceDownload bool
+	ignoreErrors  bool
 }
 
 // buildControlPlaneRuntime is the final construction boundary after config
@@ -81,6 +89,10 @@ func buildControlPlaneRuntime(
 	fullconeDirectDialer netproxy.Dialer,
 	systemDNSResolver *netutils.SystemDNSResolver,
 	externGeoDataDirs []string,
+	ruleProviders []config.KeyableString,
+	ruleProviderDir string,
+	ruleProviderDNSRouter *daedns.Router,
+	ruleProviderOpts ruleProviderBuildOptions,
 	prepareOnly bool,
 	dnsRoutingUnchanged bool,
 	isReloadBuild bool,
@@ -92,18 +104,23 @@ func buildControlPlaneRuntime(
 		dnsCache,
 		tagToNodeList,
 		groups,
+		ruleProviders,
 		routing,
 		global,
 		dns,
 		externGeoDataDirs,
+		ruleProviderDir,
 		control.ControlPlaneBuildOptions{
-			DelayDatapathCommit:   prepareOnly,
-			DelayDNSListenerStart: prepareOnly,
-			DNSRoutingUnchanged:   dnsRoutingUnchanged,
-			IsReload:              isReloadBuild || bpf != nil,
-			DirectDialer:          directDialer,
-			FullconeDirectDialer:  fullconeDirectDialer,
-			SystemDNSResolver:     systemDNSResolver,
+			DelayDatapathCommit:       prepareOnly,
+			DelayDNSListenerStart:     prepareOnly,
+			DNSRoutingUnchanged:       dnsRoutingUnchanged,
+			IsReload:                  isReloadBuild || bpf != nil,
+			DirectDialer:              directDialer,
+			FullconeDirectDialer:      fullconeDirectDialer,
+			SystemDNSResolver:         systemDNSResolver,
+			ForceRuleProviderDownload: ruleProviderOpts.forceDownload,
+			IgnoreRuleProviderErrors:  ruleProviderOpts.ignoreErrors,
+			RuleProviderDNSRouter:     ruleProviderDNSRouter,
 		},
 	)
 }
@@ -161,7 +178,7 @@ func configureGcMemoryLimit(log *logrus.Logger) {
 	}
 }
 
-func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, dnsCache map[string]*control.DnsCache, conf *config.Config, externGeoDataDirs []string, prepareOnly bool, dnsRoutingUnchanged bool, isReloadBuild bool) (c *control.ControlPlane, err error) {
+func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, dnsCache map[string]*control.DnsCache, conf *config.Config, externGeoDataDirs []string, prepareOnly bool, dnsRoutingUnchanged bool, isReloadBuild bool, ruleProviderOpts ruleProviderBuildOptions) (c *control.ControlPlane, err error) {
 	// Deep copy to prevent modification.
 	conf = deepcopy.Copy(conf).(*config.Config)
 	if conf.Global.SoMarkFromDae == 0 {
@@ -195,9 +212,22 @@ func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, d
 	directDialers := direct.NewDirectDialers(conf.Global.FallbackResolver)
 	systemDNSResolver := netutils.NewSystemDNSResolver(netip.MustParseAddrPort(conf.Global.FallbackResolver))
 	locationFinder := assets.NewLocationFinder(externGeoDataDirs)
+	ruleProviderMap, err := config.KeyableStringMap(conf.RuleProvider)
+	if err != nil {
+		return nil, fmt.Errorf("rule_provider: %w", err)
+	}
+	ruleProviderDir := filepath.Join(filepath.Dir(cfgFile), "rules")
+	if !ruleProviderOpts.forceDownload && ruleProviderForceRefreshDue(conf, ruleProviderDir, time.Now()) {
+		ruleProviderOpts.forceDownload = true
+		log.Infoln("[RuleProvider] Cached rule provider is due; force refreshing all rule providers")
+	}
 	daeDNSRouter, err := daedns.NewWithOption(log, &conf.Global, &conf.Dns, &daedns.NewOption{
-		LocationFinder: locationFinder,
-		DirectDialer:   directDialers.Symmetric,
+		LocationFinder:               locationFinder,
+		DirectDialer:                 directDialers.Symmetric,
+		RuleProviders:                ruleProviderMap,
+		RuleProviderDir:              ruleProviderDir,
+		RuleProviderDownloadDisabled: true,
+		SkipUnavailableRuleProviders: true,
 	})
 	if err != nil {
 		return nil, err
@@ -392,6 +422,10 @@ func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, d
 		directDialers.Fullcone,
 		systemDNSResolver,
 		externGeoDataDirs,
+		conf.RuleProvider,
+		ruleProviderDir,
+		daeDNSRouter,
+		ruleProviderOpts,
 		prepareOnly,
 		dnsRoutingUnchanged,
 		isReloadBuild,
