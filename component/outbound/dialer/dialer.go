@@ -144,6 +144,11 @@ type Dialer struct {
 	// counter is what keeps the magnitude of repeated promotions visible.
 	proxyFailurePromotions atomic.Uint64
 
+	// dialFailures gates probes triggered by real connection failures.
+	//   0: TCP
+	//   1: UDP
+	dialFailures [2]dialFailureTracker
+
 	recoveryManagerMu sync.Mutex
 	recoveryManager   *dialerRecoveryManager
 

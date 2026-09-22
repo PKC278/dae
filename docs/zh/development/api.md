@@ -112,8 +112,9 @@ provider 可以刷新，inline/file provider 返回 `404 capability_not_supporte
 `kind: "node"` 报告。
 
 `policy.kind` 与 dae 策略对应：`select` 为 `selector`，`fixed` 为 `fixed`，`random`
-为 `random`，`min` / `min_avg10` / `min_moving_avg` 为 `urltest`。`selector`
-接受 `PUT .../selection`；自动策略（`random` 与三个 `min*`）把同样的调用当作运行时
+为 `random`，`fallback` 为 `fallback`，`min` / `min_avg10` / `min_moving_avg` 为
+`urltest`。`selector` 接受 `PUT .../selection`；自动策略（`random`、`fallback` 与三个
+`min*`）把同样的调用当作运行时
 pin（`can_override: true`）；`fixed` 不接受任何运行时选择：
 
 ```bash

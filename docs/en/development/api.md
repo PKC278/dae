@@ -143,9 +143,10 @@ by a hash of the group name or of the node link. A member is reported as
 `kind: "node"`.
 
 `policy.kind` follows the dae policy: `select` is `selector`, `fixed` is
-`fixed`, `random` is `random`, and `min` / `min_avg10` / `min_moving_avg` are
-`urltest`. A `selector` accepts `PUT .../selection`; the automatic policies
-(`random` and the three `min*` policies) accept the same call as a runtime pin
+`fixed`, `random` is `random`, `fallback` is `fallback`, and `min` /
+`min_avg10` / `min_moving_avg` are `urltest`. A `selector` accepts
+`PUT .../selection`; the automatic policies (`random`, `fallback` and the three
+`min*` policies) accept the same call as a runtime pin
 (`can_override: true`), and `fixed` accepts nothing:
 
 ```bash

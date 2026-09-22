@@ -50,3 +50,11 @@ func TestNewDialerSelectionPolicyFromGroupParamSelect(t *testing.T) {
 		require.Error(t, err)
 	}
 }
+
+func TestNewDialerSelectionPolicyFromGroupParamFallback(t *testing.T) {
+	policy, err := NewDialerSelectionPolicyFromGroupParam(&config.Group{
+		Policy: "fallback",
+	})
+	require.NoError(t, err)
+	require.Equal(t, consts.DialerSelectionPolicy_Fallback, policy.Policy)
+}

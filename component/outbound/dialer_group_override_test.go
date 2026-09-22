@@ -117,6 +117,7 @@ func TestDialerGroupOverrideResetsOnReload(t *testing.T) {
 
 func TestSupportsOverride(t *testing.T) {
 	require.True(t, consts.DialerSelectionPolicy_Random.SupportsOverride())
+	require.True(t, consts.DialerSelectionPolicy_Fallback.SupportsOverride())
 	require.True(t, consts.DialerSelectionPolicy_MinLastLatency.SupportsOverride())
 	require.True(t, consts.DialerSelectionPolicy_MinAverage10Latencies.SupportsOverride())
 	require.True(t, consts.DialerSelectionPolicy_MinMovingAverageLatencies.SupportsOverride())
