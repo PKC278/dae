@@ -82,5 +82,6 @@ func inheritGroupOptionRuntime(dst, src *dialer.GlobalOption) {
 	}
 	dst.DaeDNS = src.DaeDNS
 	dst.TransportCacheNamespace = src.TransportCacheNamespace
+	dst.ChainGroups = src.ChainGroups
 	dst.SetRuntimeDependencies(src.DirectDialer, src.FullconeDirectDialer, src.SystemDNSResolver)
 }

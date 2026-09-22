@@ -729,6 +729,10 @@ func NewControlPlaneWithContextOptions(
 		outbounds = append(outbounds, dialerGroup)
 	}
 
+	if err := validateChainGroups(outbounds, dialerSet.AllDialers()); err != nil {
+		return nil, err
+	}
+
 	registeredDialerCallbacks := make(map[*dialer.Dialer]struct{})
 	for _, group := range outbounds {
 		for _, d := range group.Dialers {
