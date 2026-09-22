@@ -36,7 +36,7 @@ routing {
   domainx(suffix: a.com) -> direct
 }
 `)
-		err := validateRoutingRules(logrus.New(), conf, nil)
+		err := validateRoutingRules(logrus.New(), conf, nil, "")
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "unknown function")
 	})
@@ -48,7 +48,7 @@ routing {
   domain(bogus: a.com) -> direct
 }
 `)
-		err := validateRoutingRules(logrus.New(), conf, nil)
+		err := validateRoutingRules(logrus.New(), conf, nil, "")
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "unsupported key")
 	})
@@ -60,7 +60,7 @@ routing {
   ip(1.2.3.4/999) -> direct
 }
 `)
-		err := validateRoutingRules(logrus.New(), conf, nil)
+		err := validateRoutingRules(logrus.New(), conf, nil, "")
 		require.Error(t, err)
 	})
 
@@ -71,7 +71,7 @@ routing {
   domain(suffix: a.com) -> missing_group
 }
 `)
-		err := validateRoutingRules(logrus.New(), conf, nil)
+		err := validateRoutingRules(logrus.New(), conf, nil, "")
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "not found")
 	})
@@ -83,7 +83,7 @@ routing {
   fallback: direct(bogus: 1)
 }
 `)
-		err := validateRoutingRules(logrus.New(), conf, nil)
+		err := validateRoutingRules(logrus.New(), conf, nil, "")
 		require.Error(t, err)
 	})
 
@@ -105,7 +105,7 @@ routing {
   fallback: direct
 }
 `)
-		require.NoError(t, validateRoutingRules(logrus.New(), conf, nil))
+		require.NoError(t, validateRoutingRules(logrus.New(), conf, nil, ""))
 	})
 }
 
@@ -140,7 +140,7 @@ func TestValidateRoutingRulesRejectsNamedParametersOnValueOnlyFunctions(t *testi
 	}
 	for name, rule := range bogusRules {
 		t.Run(name, func(t *testing.T) {
-			err := validateRoutingRules(logrus.New(), parse(t, rule), nil)
+			err := validateRoutingRules(logrus.New(), parse(t, rule), nil, "")
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "unsupported parameter key")
 			require.Contains(t, err.Error(), `"bogus_param"`)
@@ -164,7 +164,7 @@ func TestValidateRoutingRulesRejectsNamedParametersOnValueOnlyFunctions(t *testi
 	}
 	for name, rule := range bareRules {
 		t.Run(name+"/bare", func(t *testing.T) {
-			require.NoError(t, validateRoutingRules(logrus.New(), parse(t, rule), nil))
+			require.NoError(t, validateRoutingRules(logrus.New(), parse(t, rule), nil, ""))
 		})
 	}
 }
@@ -189,7 +189,7 @@ routing {
 	require.NoError(t, err)
 	conf, err := config.New(sections)
 	require.NoError(t, err)
-	require.NoError(t, validateRoutingRules(logrus.New(), conf, nil))
+	require.NoError(t, validateRoutingRules(logrus.New(), conf, nil, ""))
 	// A node-only name is not an outbound: the matcher builder resolves rule
 	// outbounds against groups, so it must be rejected.
 	sections, err = config_parser.Parse(`
@@ -205,7 +205,7 @@ routing {
 	require.NoError(t, err)
 	confWithNode, err := config.New(sections)
 	require.NoError(t, err)
-	err = validateRoutingRules(logrus.New(), confWithNode, nil)
+	err = validateRoutingRules(logrus.New(), confWithNode, nil, "")
 	require.Error(t, err)
 	require.True(t, strings.Contains(err.Error(), "some_tag"), err)
 }
