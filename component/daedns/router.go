@@ -353,6 +353,16 @@ func (r *Router) replaceHTTPClient(previous *dnstransport.HTTPClientGeneration, 
 	return next
 }
 
+// RequestMatcher exposes the compiled DNS request routing matcher so callers
+// that would otherwise compile an identical one can reuse it. The matcher is
+// immutable once built and safe for concurrent use.
+func (r *Router) RequestMatcher() *componentdns.RequestMatcher {
+	if r == nil {
+		return nil
+	}
+	return r.requestMatcher
+}
+
 func (r *Router) initUpstreams(rawUpstreams []config.KeyableString) error {
 	resolveIp46 := r.resolveBootstrap
 	if len(r.bootstrapDns) == 0 {
