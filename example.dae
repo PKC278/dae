@@ -189,6 +189,10 @@ node {
     node1: 'vmess://LINK'
     node2: 'vless://LINK'
     chains: 'tuic://LINK -> vmess://LINK'
+    # A node can also be reached through a group instead of a fixed first hop.
+    # The group hop comes last and carries every hop written before it.
+    # See https://github.com/daeuniverse/dae/blob/main/docs/en/configuration/chain-proxy.md
+    #landing: 'vless://LINK -> group://front'
     hysteria2: 'hysteria2://password@server-ip:port/?sni=domain'
 }
 
