@@ -380,6 +380,10 @@ struct {
 
 struct domain_routing {
 	__u32 bitmap[MAX_MATCH_SET_LEN / 32];
+	// Set when the address is claimed by domains whose rules disagree, so an
+	// IP-level decision is only a candidate until the domain is known.
+	__u8 ambiguous;
+	__u8 padding[3];
 };
 
 struct routing_epoch_ip {
@@ -1718,6 +1722,19 @@ static __always_inline int route_match_domain_set(struct route_ctx *ctx,
 				domain_routing->bitmap[bitmap_word_idx];
 		else
 			ctx->domain_word_bits = 0;
+		if (domain_routing && domain_routing->ambiguous) {
+			/* Domains sharing this address disagree, so no rule can
+			 * decide it from the address alone. Stop here and hand
+			 * the flow to the control plane, which re-routes it on
+			 * the sniffed domain; mark and must come from that
+			 * second pass, so nothing is lost by not finishing this
+			 * one. Short-circuiting also keeps ambiguity out of
+			 * route_state, whose every extra bit multiplies the
+			 * states the verifier explores in this loop.
+			 */
+			ctx->result = (__s64)OUTBOUND_CONTROL_PLANE_ROUTING;
+			return 1;
+		}
 		ctx->domain_word_cached = true;
 	}
 
@@ -1808,7 +1825,15 @@ route_eval_match(struct route_ctx *ctx, const struct match_set *match_set,
 			"CHECK: pname, match_set->type: %u, not: %d, outbound: %u",
 			match_type, match_set->not, match_set->outbound);
 #endif
-		if (is_wan && equal16(match_set->pname, pname))
+		if (!is_wan) {
+			/* LAN traffic has no reliable process metadata. Skip the
+			 * whole rule that depends on pname, including
+			 * !pname(...), so later rules keep matching normally.
+			 */
+			ctx->route_state |= ROUTE_STATE_BAD_RULE;
+			break;
+		}
+		if (equal16(match_set->pname, pname))
 			ctx->route_state |= ROUTE_STATE_GOOD_SUBRULE;
 		break;
 	case MatchType_Dscp:
@@ -3488,8 +3513,13 @@ wan_outbound_is_alive(struct __sk_buff *skb, __u8 outbound, __u8 l4proto,
 	if (outbound == OUTBOUND_BLOCK || outbound >= OUTBOUND_MUST_RULES)
 		return true;
 
-	/* DNS must always reach control plane; userspace handles fallback. */
-	if (dport == bpf_htons(53))
+	/* DNS queries must always reach the control plane. Userspace DNS routing
+	 * owns fallback, rejection and SERVFAIL synthesis, so dropping port 53
+	 * here turns upstream health noise into client-visible timeouts. This
+	 * covers TCP DNS as well as UDP DNS.
+	 */
+	if ((l4proto == IPPROTO_UDP || l4proto == IPPROTO_TCP) &&
+	    dport == bpf_htons(53))
 		return true;
 
 	// ARRAY map key: outbound_id * 6 + domain * 2 + ipversion
