@@ -68,6 +68,29 @@ func newPreparedControlPlane(ctx context.Context, log *logrus.Logger, bpf any, d
 type ruleProviderBuildOptions struct {
 	forceDownload bool
 	ignoreErrors  bool
+	// bestEffortRefresh lets the forced refresh fail without failing the
+	// build. It is only set when every rule set already has a cached copy.
+	bestEffortRefresh bool
+}
+
+// startupGCPercent trades peak heap for construction latency. Building the
+// routing and DNS domain matchers allocates heavily while keeping the tries
+// themselves alive, so at the default GOGC=100 the collector runs repeatedly
+// over a large live set. Measured on an aarch64 router with a 140k-domain rule
+// set, raising it cuts control plane construction from ~13.7s to ~4.5s for
+// roughly +50MB of peak RSS. Beyond 400 the time gain flattens while peak RSS
+// keeps climbing.
+const startupGCPercent = 400
+
+// boostStartupGC raises the GC target for the duration of control plane
+// construction and returns a function that restores the previous setting. An
+// explicit GOGC in the environment is an operator decision and is left alone.
+func boostStartupGC() func() {
+	if _, explicit := os.LookupEnv("GOGC"); explicit {
+		return func() {}
+	}
+	previous := debug.SetGCPercent(startupGCPercent)
+	return func() { debug.SetGCPercent(previous) }
 }
 
 // buildControlPlaneRuntime is the final construction boundary after config
@@ -111,16 +134,17 @@ func buildControlPlaneRuntime(
 		externGeoDataDirs,
 		ruleProviderDir,
 		control.ControlPlaneBuildOptions{
-			DelayDatapathCommit:       prepareOnly,
-			DelayDNSListenerStart:     prepareOnly,
-			DNSRoutingUnchanged:       dnsRoutingUnchanged,
-			IsReload:                  isReloadBuild || bpf != nil,
-			DirectDialer:              directDialer,
-			FullconeDirectDialer:      fullconeDirectDialer,
-			SystemDNSResolver:         systemDNSResolver,
-			ForceRuleProviderDownload: ruleProviderOpts.forceDownload,
-			IgnoreRuleProviderErrors:  ruleProviderOpts.ignoreErrors,
-			RuleProviderDNSRouter:     ruleProviderDNSRouter,
+			DelayDatapathCommit:           prepareOnly,
+			DelayDNSListenerStart:         prepareOnly,
+			DNSRoutingUnchanged:           dnsRoutingUnchanged,
+			IsReload:                      isReloadBuild || bpf != nil,
+			DirectDialer:                  directDialer,
+			FullconeDirectDialer:          fullconeDirectDialer,
+			SystemDNSResolver:             systemDNSResolver,
+			ForceRuleProviderDownload:     ruleProviderOpts.forceDownload,
+			IgnoreRuleProviderErrors:      ruleProviderOpts.ignoreErrors,
+			BestEffortRuleProviderRefresh: ruleProviderOpts.bestEffortRefresh,
+			RuleProviderDNSRouter:         ruleProviderDNSRouter,
 		},
 	)
 }
@@ -179,6 +203,8 @@ func configureGcMemoryLimit(log *logrus.Logger) {
 }
 
 func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, dnsCache map[string]*control.DnsCache, conf *config.Config, externGeoDataDirs []string, prepareOnly bool, dnsRoutingUnchanged bool, isReloadBuild bool, ruleProviderOpts ruleProviderBuildOptions) (c *control.ControlPlane, err error) {
+	defer boostStartupGC()()
+
 	// Deep copy to prevent modification.
 	conf = deepcopy.Copy(conf).(*config.Config)
 	if conf.Global.SoMarkFromDae == 0 {
@@ -219,6 +245,12 @@ func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, d
 	ruleProviderDir := filepath.Join(filepath.Dir(cfgFile), "rules")
 	if !ruleProviderOpts.forceDownload && ruleProviderForceRefreshDue(conf, ruleProviderDir, time.Now()) {
 		ruleProviderOpts.forceDownload = true
+		// A refresh triggered purely by age must not be able to keep dae from
+		// starting. Every rule set already has a cached copy in that case, so a
+		// download failure, a reboot before the WAN is up most typically, only
+		// means carrying on with slightly stale rules. A rule set that is
+		// missing altogether stays fatal: routing cannot be built without it.
+		ruleProviderOpts.bestEffortRefresh = ruleProvidersFullyCached(conf, ruleProviderDir)
 		log.Infoln("[RuleProvider] Cached rule provider is due; force refreshing all rule providers")
 	}
 	daeDNSRouter, err := daedns.NewWithOption(log, &conf.Global, &conf.Dns, &daedns.NewOption{
