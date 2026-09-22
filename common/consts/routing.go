@@ -29,4 +29,5 @@ const (
 	Function_Upstream = "upstream"
 
 	OutboundParam_Mark = "mark"
+	OutboundParam_Drop = "drop"
 )

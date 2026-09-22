@@ -59,6 +59,8 @@ type bpfMatchSet struct {
 	Type     uint8
 	Outbound uint8
 	Must     uint8
+	Drop     uint8
+	_        [2]byte
 	Mark     uint32
 }
 
@@ -105,6 +107,7 @@ type bpfRoutingResult struct {
 	Pname              [16]uint8
 	Pid                uint32
 	Dscp               uint8
+	Drop               uint8
 	RoutingEpochSlot   uint8
 	DatapathGeneration uint16
 }
@@ -231,6 +234,7 @@ type bpfMapSpecs struct {
 	RedirectTrack            *ebpf.MapSpec `ebpf:"redirect_track"`
 	RouteCtxScratchMap       *ebpf.MapSpec `ebpf:"route_ctx_scratch_map"`
 	RoutingHandoffMap        *ebpf.MapSpec `ebpf:"routing_handoff_map"`
+	RoutingHandoffScratchMap *ebpf.MapSpec `ebpf:"routing_handoff_scratch_map"`
 	RoutingMap               *ebpf.MapSpec `ebpf:"routing_map"`
 	RoutingMetaMap           *ebpf.MapSpec `ebpf:"routing_meta_map"`
 	ConnStateMap             *ebpf.MapSpec `ebpf:"conn_state_map"`
@@ -275,6 +279,7 @@ type bpfMaps struct {
 	RedirectTrack            *ebpf.Map `ebpf:"redirect_track"`
 	RouteCtxScratchMap       *ebpf.Map `ebpf:"route_ctx_scratch_map"`
 	RoutingHandoffMap        *ebpf.Map `ebpf:"routing_handoff_map"`
+	RoutingHandoffScratchMap *ebpf.Map `ebpf:"routing_handoff_scratch_map"`
 	RoutingMap               *ebpf.Map `ebpf:"routing_map"`
 	RoutingMetaMap           *ebpf.Map `ebpf:"routing_meta_map"`
 	ConnStateMap             *ebpf.Map `ebpf:"conn_state_map"`
@@ -303,6 +308,7 @@ func (m *bpfMaps) Close() error {
 		m.RedirectTrack,
 		m.RouteCtxScratchMap,
 		m.RoutingHandoffMap,
+		m.RoutingHandoffScratchMap,
 		m.RoutingMap,
 		m.RoutingMetaMap,
 		m.ConnStateMap,

@@ -274,6 +274,9 @@ func (c *ControlPlane) handleConnWithRoutingResultOwned(
 	// Dial and relay.
 	rConn, res, err := c.routeDial(ctx, dialParam)
 	if err != nil {
+		if stderrors.Is(err, errBlockDrop) {
+			return nil
+		}
 		if res != nil && res.Outbound != nil && stderrors.Is(err, ob.ErrNoAliveDialer) {
 			res.Outbound.HandleNoAliveDialer(
 				res.OrigNetworkType,
@@ -395,6 +398,7 @@ func tcpProxyDialParamFromRoutingResult(routingResult *bpfRoutingResult, domain 
 		Dest:        dst,
 		Mark:        routingResult.Mark,
 		Network:     "tcp",
+		Drop:        routingResult.Drop != 0,
 	}
 }
 

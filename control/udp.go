@@ -608,6 +608,9 @@ func (c *ControlPlane) handlePktOwned(data []byte, src, realDst netip.AddrPort, 
 	now := time.Now()
 	nowNano := now.UnixNano()
 	realSrc = src
+	if routingResult.Drop != 0 {
+		return nil
+	}
 	routeScope := udpEndpointRouteScope{}
 	forceSymmetricKey := false
 	if c.udpRouteScopeSensitive {
@@ -1074,6 +1077,7 @@ getNew:
 					Mark:        routingResult.Mark,
 					Network:     "udp",
 					Excluded:    excludedDialer,
+					Drop:        routingResult.Drop != 0,
 				}
 
 				res, err := c.chooseProxyDialer(dialParam)
@@ -1122,6 +1126,9 @@ getNew:
 			},
 		})
 		if err != nil {
+			if stderrors.Is(err, errBlockDrop) || stderrors.Is(err, errBlockReject) {
+				return nil
+			}
 			if stderrors.Is(err, ob.ErrNoAliveDialer) || stderrors.Is(err, ErrEndpointFailed) ||
 				stderrors.Is(err, errUdpEndpointAdmissionClosed) {
 				// Already emitted a rate-limited diagnostic log above, or hit negative cache.
