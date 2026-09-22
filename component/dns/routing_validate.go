@@ -51,7 +51,14 @@ func upstreamName2Id(dnsCfg *config.Dns) map[string]uint8 {
 // BPF object, socket or upstream connection is touched, and upstream
 // reachability is deliberately not tested because dns.New does not test it
 // either.
-func ValidateRouting(log *logrus.Logger, dnsCfg *config.Dns, externGeoDataDirs []string) error {
+//
+// ruleProviders and ruleProviderDir are the same pair dns.New receives, so a
+// `rule-set:` operand resolves against the declared providers instead of
+// reading as undefined. Validation never downloads: an operand whose rule set
+// is not cached on disk yet is skipped rather than failing, the way the run
+// path's own DNS router treats it, while a name no rule_provider declares still
+// fails here.
+func ValidateRouting(log *logrus.Logger, dnsCfg *config.Dns, externGeoDataDirs []string, ruleProviders map[string]string, ruleProviderDir string) error {
 	if dnsCfg == nil {
 		return nil
 	}
@@ -65,8 +72,12 @@ func ValidateRouting(log *logrus.Logger, dnsCfg *config.Dns, externGeoDataDirs [
 	// and deduplicate. The alias optimizer is not applied because dns.New does
 	// not apply it to the DNS blocks.
 	datReader := &routing.DatReaderOptimizer{
-		Logger:         log,
-		LocationFinder: assets.NewLocationFinder(externGeoDataDirs),
+		Logger:                       log,
+		LocationFinder:               assets.NewLocationFinder(externGeoDataDirs),
+		RuleProviders:                ruleProviders,
+		RuleProviderDir:              ruleProviderDir,
+		RuleProviderDownloadDisabled: true,
+		SkipUnavailableRuleProviders: true,
 	}
 
 	requestProgram, err := NewNormalizedRequestRoutingProgram(

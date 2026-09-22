@@ -417,10 +417,15 @@ func (e *configEditor) fullValidate(conf *config.Config) error {
 	if err := conf.Api.Validate(); err != nil {
 		return err
 	}
-	if err := validateRoutingRules(e.log, conf, []string{e.baseDir}); err != nil {
+	ruleProviderDir := filepath.Join(e.baseDir, "rules")
+	if err := validateRoutingRules(e.log, conf, []string{e.baseDir}, ruleProviderDir); err != nil {
 		return err
 	}
-	if err := dns.ValidateRouting(e.log, &conf.Dns, []string{e.baseDir}); err != nil {
+	ruleProviders, err := config.KeyableStringMap(conf.RuleProvider)
+	if err != nil {
+		return fmt.Errorf("rule_provider: %w", err)
+	}
+	if err := dns.ValidateRouting(e.log, &conf.Dns, []string{e.baseDir}, ruleProviders, ruleProviderDir); err != nil {
 		return err
 	}
 	return validateFixedDomainTtl(conf)

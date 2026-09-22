@@ -158,7 +158,7 @@ func TestValidateRoutingMatchesRunPath(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			dnsCfg := parseDns(t, tc.body)
 			runErr := runPathErr(dnsCfg)
-			validateErr := ValidateRouting(logrus.New(), dnsCfg, nil)
+			validateErr := ValidateRouting(logrus.New(), dnsCfg, nil, nil, "")
 
 			if tc.wantErr {
 				require.Error(t, runErr, "run path must reject this configuration")
