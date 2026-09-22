@@ -26,13 +26,16 @@ func TestRoutingEpochBPFABI(t *testing.T) {
 		)
 	}
 
-	if got, want := unsafe.Sizeof(bpfRoutingResult{}), uintptr(36); got != want {
+	if got, want := unsafe.Sizeof(bpfRoutingResult{}), uintptr(40); got != want {
 		t.Fatalf("sizeof(bpfRoutingResult) = %d, want %d", got, want)
 	}
-	if got, want := unsafe.Offsetof(bpfRoutingResult{}.RoutingEpochSlot), uintptr(33); got != want {
+	if got, want := unsafe.Offsetof(bpfRoutingResult{}.Drop), uintptr(33); got != want {
+		t.Fatalf("bpfRoutingResult.Drop offset = %d, want %d", got, want)
+	}
+	if got, want := unsafe.Offsetof(bpfRoutingResult{}.RoutingEpochSlot), uintptr(34); got != want {
 		t.Fatalf("bpfRoutingResult.RoutingEpochSlot offset = %d, want %d", got, want)
 	}
-	if got, want := unsafe.Offsetof(bpfRoutingResult{}.DatapathGeneration), uintptr(34); got != want {
+	if got, want := unsafe.Offsetof(bpfRoutingResult{}.DatapathGeneration), uintptr(36); got != want {
 		t.Fatalf("bpfRoutingResult.DatapathGeneration offset = %d, want %d", got, want)
 	}
 
