@@ -577,6 +577,10 @@ func (c *controlPlaneCore) _bindWan(ifname string) error {
 	egressPriority := uint16(2)
 	ingressProgram := bpf.TproxyWanIngressL3
 	ingressName := consts.AppName + "_wan_ingress_l3"
+	// Priority 2 puts dae's WAN ingress behind the NAT filters a router
+	// installs at priority 1, so a reply that belongs to an existing NAT
+	// session is translated before dae sees it.
+	ingressPriority := uint16(2)
 	if c.isDualRoleTCInterface(ifname) {
 		programs := selectDualRoleTCHookPrograms(bpf, linkHdrLen > 0)
 		egressProgram = programs.egress
@@ -584,6 +588,7 @@ func (c *controlPlaneCore) _bindWan(ifname string) error {
 		egressPriority = 1
 		ingressProgram = programs.ingress
 		ingressName = programs.ingressName
+		ingressPriority = 1
 	} else if linkHdrLen > 0 {
 		egressProgram = bpf.TproxyWanEgressL2
 		egressName = consts.AppName + "_wan_egress_l2"
@@ -593,7 +598,7 @@ func (c *controlPlaneCore) _bindWan(ifname string) error {
 	if err := c.stageTCHook(makeTCHookSpec(tcHookScopeHost, link, tcHookEgress, egressPriority, 0x2023, egressProgram, egressName, nil)); err != nil {
 		return fmt.Errorf("install WAN egress hook: %w", err)
 	}
-	if err := c.stageTCHook(makeTCHookSpec(tcHookScopeHost, link, tcHookIngress, 1, 0x2023, ingressProgram, ingressName, nil)); err != nil {
+	if err := c.stageTCHook(makeTCHookSpec(tcHookScopeHost, link, tcHookIngress, ingressPriority, 0x2023, ingressProgram, ingressName, nil)); err != nil {
 		return fmt.Errorf("install WAN ingress hook: %w", err)
 	}
 
