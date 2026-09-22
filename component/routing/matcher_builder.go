@@ -23,6 +23,7 @@ type Outbound struct {
 	Name string
 	Mark uint32
 	Must bool
+	Drop bool
 }
 
 type RulesBuilder struct {
@@ -64,6 +65,7 @@ func (b *RulesBuilder) Apply(rules []*config_parser.RoutingRule) (err error) {
 					Name: consts.OutboundLogicalOr.String(),
 					Mark: outbound.Mark,
 					Must: outbound.Must,
+					Drop: outbound.Drop,
 				}
 				if jMatchSet == len(keyOrder)-1 {
 					overrideOutbound.Name = consts.OutboundLogicalAnd.String()
@@ -106,6 +108,7 @@ func ParseOutbound(rawOutbound *config_parser.Function) (outbound *Outbound, err
 		Name: rawOutbound.Name,
 		Mark: 0,
 		Must: false,
+		Drop: false,
 	}
 	for _, p := range rawOutbound.Params {
 		switch p.Key {
@@ -117,9 +120,15 @@ func ParseOutbound(rawOutbound *config_parser.Function) (outbound *Outbound, err
 			}
 			outbound.Mark = uint32(_mark)
 		case "":
-			if p.Val == "must" {
+			switch p.Val {
+			case "must":
 				outbound.Must = true
-			} else {
+			case consts.OutboundParam_Drop:
+				if rawOutbound.Name != consts.OutboundBlock.String() {
+					return nil, fmt.Errorf("outbound param %q is only supported by block", p.Val)
+				}
+				outbound.Drop = true
+			default:
 				return nil, fmt.Errorf("unknown outbound param: %v", p.Val)
 			}
 		default:

@@ -393,13 +393,14 @@ func (b *RoutingMatcherBuilder) UsesPacketMetadataRouting() bool {
 	return b.packetMetadataSensitiveRouting
 }
 
-func newCompiledRoutingBase(matchType consts.MatchType, not bool, outboundID uint8, mark uint32, must bool) compiledRoutingMatch {
+func newCompiledRoutingBase(matchType consts.MatchType, not bool, outboundID uint8, mark uint32, must bool, drop bool) compiledRoutingMatch {
 	return compiledRoutingMatch{
 		matchType: matchType,
 		outbound:  consts.OutboundIndex(outboundID),
 		not:       not,
 		mark:      mark,
 		must:      must,
+		drop:      drop,
 	}
 }
 
@@ -432,9 +433,10 @@ func (b *RoutingMatcherBuilder) addDomain(f *config_parser.Function, key string,
 		Outbound: outboundId,
 		Mark:     outbound.Mark,
 		Must:     bpfBool(outbound.Must),
+		Drop:     bpfBool(outbound.Drop),
 	}
 	b.appendRule(set, newCompiledRoutingBase(
-		consts.MatchType_DomainSet, f.Not, outboundId, outbound.Mark, outbound.Must,
+		consts.MatchType_DomainSet, f.Not, outboundId, outbound.Mark, outbound.Must, outbound.Drop,
 	))
 	return nil
 }
@@ -465,9 +467,10 @@ func (b *RoutingMatcherBuilder) addSourceMac(f *config_parser.Function, macAddrs
 		Outbound: outboundId,
 		Mark:     outbound.Mark,
 		Must:     bpfBool(outbound.Must),
+		Drop:     bpfBool(outbound.Drop),
 	}
 	nativeBpfABI.putUint32(set.Value[:], uint32(lpmTrieIndex))
-	compiled := newCompiledRoutingBase(consts.MatchType_Mac, f.Not, outboundId, outbound.Mark, outbound.Must)
+	compiled := newCompiledRoutingBase(consts.MatchType_Mac, f.Not, outboundId, outbound.Mark, outbound.Must, outbound.Drop)
 	compiled.lpmIndex = uint32(lpmTrieIndex)
 	b.appendRule(set, compiled)
 	return nil
@@ -504,9 +507,10 @@ func (b *RoutingMatcherBuilder) addIp(f *config_parser.Function, values []netip.
 		Outbound: outboundId,
 		Mark:     outbound.Mark,
 		Must:     bpfBool(outbound.Must),
+		Drop:     bpfBool(outbound.Drop),
 	}
 	nativeBpfABI.putUint32(set.Value[:], lpmTrieIndex)
-	compiled := newCompiledRoutingBase(consts.MatchType_IpSet, f.Not, outboundId, outbound.Mark, outbound.Must)
+	compiled := newCompiledRoutingBase(consts.MatchType_IpSet, f.Not, outboundId, outbound.Mark, outbound.Must, outbound.Drop)
 	compiled.lpmIndex = lpmTrieIndex
 	b.appendRule(set, compiled)
 	return nil
@@ -532,8 +536,9 @@ func (b *RoutingMatcherBuilder) addPort(f *config_parser.Function, values [][2]u
 			Outbound: outboundId,
 			Mark:     outbound.Mark,
 			Must:     bpfBool(outbound.Must),
+			Drop:     bpfBool(outbound.Drop),
 		}
-		compiled := newCompiledRoutingBase(consts.MatchType_Port, f.Not, outboundId, outbound.Mark, outbound.Must)
+		compiled := newCompiledRoutingBase(consts.MatchType_Port, f.Not, outboundId, outbound.Mark, outbound.Must, outbound.Drop)
 		compiled.portStart = value[0]
 		compiled.portEnd = value[1]
 		b.appendRule(set, compiled)
@@ -572,9 +577,10 @@ func (b *RoutingMatcherBuilder) addSourceIp(f *config_parser.Function, values []
 		Outbound: outboundId,
 		Mark:     outbound.Mark,
 		Must:     bpfBool(outbound.Must),
+		Drop:     bpfBool(outbound.Drop),
 	}
 	nativeBpfABI.putUint32(set.Value[:], lpmTrieIndex)
-	compiled := newCompiledRoutingBase(consts.MatchType_SourceIpSet, f.Not, outboundId, outbound.Mark, outbound.Must)
+	compiled := newCompiledRoutingBase(consts.MatchType_SourceIpSet, f.Not, outboundId, outbound.Mark, outbound.Must, outbound.Drop)
 	compiled.lpmIndex = lpmTrieIndex
 	b.appendRule(set, compiled)
 	return nil
@@ -600,8 +606,9 @@ func (b *RoutingMatcherBuilder) addSourcePort(f *config_parser.Function, values 
 			Outbound: outboundId,
 			Mark:     outbound.Mark,
 			Must:     bpfBool(outbound.Must),
+			Drop:     bpfBool(outbound.Drop),
 		}
-		compiled := newCompiledRoutingBase(consts.MatchType_SourcePort, f.Not, outboundId, outbound.Mark, outbound.Must)
+		compiled := newCompiledRoutingBase(consts.MatchType_SourcePort, f.Not, outboundId, outbound.Mark, outbound.Must, outbound.Drop)
 		compiled.portStart = value[0]
 		compiled.portEnd = value[1]
 		b.appendRule(set, compiled)
@@ -621,8 +628,9 @@ func (b *RoutingMatcherBuilder) addL4Proto(f *config_parser.Function, values con
 		Outbound: outboundId,
 		Mark:     outbound.Mark,
 		Must:     bpfBool(outbound.Must),
+		Drop:     bpfBool(outbound.Drop),
 	}
-	compiled := newCompiledRoutingBase(consts.MatchType_L4Proto, f.Not, outboundId, outbound.Mark, outbound.Must)
+	compiled := newCompiledRoutingBase(consts.MatchType_L4Proto, f.Not, outboundId, outbound.Mark, outbound.Must, outbound.Drop)
 	compiled.mask = uint8(values)
 	b.appendRule(set, compiled)
 	return nil
@@ -640,8 +648,9 @@ func (b *RoutingMatcherBuilder) addIpVersion(f *config_parser.Function, values c
 		Outbound: outboundId,
 		Mark:     outbound.Mark,
 		Must:     bpfBool(outbound.Must),
+		Drop:     bpfBool(outbound.Drop),
 	}
-	compiled := newCompiledRoutingBase(consts.MatchType_IpVersion, f.Not, outboundId, outbound.Mark, outbound.Must)
+	compiled := newCompiledRoutingBase(consts.MatchType_IpVersion, f.Not, outboundId, outbound.Mark, outbound.Must, outbound.Drop)
 	compiled.mask = uint8(values)
 	b.appendRule(set, compiled)
 	return nil
@@ -664,9 +673,10 @@ func (b *RoutingMatcherBuilder) addProcessName(f *config_parser.Function, values
 			Outbound: outboundId,
 			Mark:     outbound.Mark,
 			Must:     bpfBool(outbound.Must),
+			Drop:     bpfBool(outbound.Drop),
 		}
 		copy(matchSet.Value[:], value[:])
-		compiled := newCompiledRoutingBase(consts.MatchType_ProcessName, f.Not, outboundId, outbound.Mark, outbound.Must)
+		compiled := newCompiledRoutingBase(consts.MatchType_ProcessName, f.Not, outboundId, outbound.Mark, outbound.Must, outbound.Drop)
 		compiled.pname = value
 		b.appendRule(matchSet, compiled)
 	}
@@ -690,9 +700,10 @@ func (b *RoutingMatcherBuilder) addDscp(f *config_parser.Function, values []uint
 			Outbound: outboundId,
 			Mark:     outbound.Mark,
 			Must:     bpfBool(outbound.Must),
+			Drop:     bpfBool(outbound.Drop),
 		}
 		matchSet.Value[0] = value
-		compiled := newCompiledRoutingBase(consts.MatchType_Dscp, f.Not, outboundId, outbound.Mark, outbound.Must)
+		compiled := newCompiledRoutingBase(consts.MatchType_Dscp, f.Not, outboundId, outbound.Mark, outbound.Must, outbound.Drop)
 		compiled.dscp = value
 		b.appendRule(matchSet, compiled)
 	}
@@ -717,9 +728,10 @@ func (b *RoutingMatcherBuilder) addFallback(fallbackOutbound config.FunctionOrSt
 		Outbound: outboundId,
 		Mark:     outbound.Mark,
 		Must:     bpfBool(outbound.Must),
+		Drop:     bpfBool(outbound.Drop),
 	}
 	b.appendRule(set, newCompiledRoutingBase(
-		consts.MatchType_Fallback, false, outboundId, outbound.Mark, outbound.Must,
+		consts.MatchType_Fallback, false, outboundId, outbound.Mark, outbound.Must, outbound.Drop,
 	))
 	return nil
 }
