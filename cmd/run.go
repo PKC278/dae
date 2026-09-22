@@ -454,6 +454,23 @@ func ruleProviderForceRefreshDue(conf *config.Config, ruleProviderDir string, no
 	return false
 }
 
+// ruleProvidersFullyCached reports whether every configured rule provider has a
+// file on disk. When it does, a refresh that fails leaves every rule set still
+// available, just older, so the refresh can be treated as best-effort instead
+// of a reason to abort startup.
+func ruleProvidersFullyCached(conf *config.Config, ruleProviderDir string) bool {
+	ruleProviders, err := config.KeyableStringMap(conf.RuleProvider)
+	if err != nil || len(ruleProviders) == 0 {
+		return false
+	}
+	for name := range ruleProviders {
+		if _, statErr := os.Stat(filepath.Join(ruleProviderDir, name+".list")); statErr != nil {
+			return false
+		}
+	}
+	return true
+}
+
 func startRuleProviderUpdateLoop(log *logrus.Logger, reloadManager *reloadManager, initialSchedule ruleProviderUpdateSchedule) *ruleProviderUpdateLoop {
 	ctx, cancel := context.WithCancel(context.Background())
 	loop := &ruleProviderUpdateLoop{
@@ -537,6 +554,7 @@ func (r *Runner) Run() (err error) {
 	}()
 
 	var currCancel context.CancelFunc
+	runStart := time.Now()
 
 	// Remove AbortFile at beginning.
 	_ = os.Remove(AbortFile)
@@ -623,8 +641,10 @@ func (r *Runner) Run() (err error) {
 					_ = os.WriteFile(PidFilePath, []byte(strconv.Itoa(os.Getpid())), 0o644)
 				}
 				_ = setRunSignalProgress(consts.ReloadDone, "")
+				logger.Milestone(log, "dae is now proxying traffic (tproxy port %v, ready in %v)",
+					conf.Global.TproxyPort, time.Since(runStart).Round(time.Millisecond))
 			} else {
-				w.log.Warn("Initialization failed; not signaling readiness to supervisor")
+				w.log.Errorln("Initialization failed; not signaling readiness to supervisor")
 			}
 		}()
 		defer func() {
