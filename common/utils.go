@@ -130,7 +130,7 @@ func FuzzyDecode(to any, val string) bool {
 	case reflect.Int64:
 		switch v.Interface().(type) {
 		case time.Duration:
-			duration, err := time.ParseDuration(val)
+			duration, err := ParseDurationWithDays(val)
 			if err != nil {
 				return false
 			}
@@ -223,6 +223,21 @@ func FuzzyDecode(to any, val string) bool {
 		return false
 	}
 	return true
+}
+
+func ParseDurationWithDays(val string) (time.Duration, error) {
+	if strings.HasSuffix(val, "d") {
+		days, err := strconv.ParseInt(strings.TrimSuffix(val, "d"), 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		const day = 24 * time.Hour
+		if days > int64(1<<63-1)/int64(day) || days < -int64(1<<63-1)/int64(day) {
+			return 0, fmt.Errorf("duration %q overflows time.Duration", val)
+		}
+		return time.Duration(days) * day, nil
+	}
+	return time.ParseDuration(val)
 }
 
 func EnsureFileInSubDir(filePath string, dir string) (err error) {
