@@ -10,7 +10,9 @@ import (
 	stderrors "errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -171,6 +173,14 @@ type ControlPlaneBuildOptions struct {
 	DirectDialer          netproxy.Dialer
 	FullconeDirectDialer  netproxy.Dialer
 	SystemDNSResolver     *netutils.SystemDNSResolver
+	// ForceRuleProviderDownload refetches every rule provider even when a
+	// cached copy is present. IgnoreRuleProviderErrors keeps the build going
+	// when a provider cannot be fetched, leaving its rule set empty.
+	ForceRuleProviderDownload bool
+	IgnoreRuleProviderErrors  bool
+	// RuleProviderDNSRouter resolves provider hosts through this generation's
+	// DNS view, so a download can run before dae's own routing is serving.
+	RuleProviderDNSRouter *daedns.Router
 }
 
 var (
@@ -310,10 +320,12 @@ func NewControlPlaneWithContextOptions(
 	dnsCache map[string]*DnsCache,
 	tagToNodeList map[string][]string,
 	groups []config.Group,
+	ruleProviders []config.KeyableString,
 	routingA *config.Routing,
 	global *config.Global,
 	dnsConfig *config.Dns,
 	externGeoDataDirs []string,
+	ruleProviderDir string,
 	buildOpts ControlPlaneBuildOptions,
 ) (plane *ControlPlane, err error) {
 	var freshDatapathState *FreshDatapathState
@@ -575,6 +587,10 @@ func NewControlPlaneWithContextOptions(
 	}
 
 	locationFinder := assets.NewLocationFinder(externGeoDataDirs)
+	ruleProviderMap, err := config.KeyableStringMap(ruleProviders)
+	if err != nil {
+		return nil, fmt.Errorf("rule_provider: %w", err)
+	}
 	option := dialer.NewGlobalOption(global, log)
 	option.SetRuntimeDependencies(directDialer, fullconeDirectDialer, systemDNSResolver)
 
@@ -607,8 +623,12 @@ func NewControlPlaneWithContextOptions(
 	})
 
 	option.DaeDNS, err = daedns.NewWithOption(log, global, dnsConfig, &daedns.NewOption{
-		LocationFinder: locationFinder,
-		DirectDialer:   directDialer,
+		LocationFinder:               locationFinder,
+		DirectDialer:                 directDialer,
+		RuleProviders:                ruleProviderMap,
+		RuleProviderDir:              ruleProviderDir,
+		RuleProviderDownloadDisabled: true,
+		SkipUnavailableRuleProviders: true,
 	})
 	if err != nil {
 		return nil, err
@@ -720,6 +740,9 @@ func NewControlPlaneWithContextOptions(
 		outboundName2Id[o.Name] = uint8(i)
 		outboundId2Name[uint8(i)] = o.Name
 	}
+	if err = downloadRuleProvidersThroughRouting(log, locationFinder, routingA, ruleProviderMap, ruleProviderDir, outboundName2Id, outbounds, global, buildOpts.RuleProviderDNSRouter, buildOpts.ForceRuleProviderDownload, buildOpts.IgnoreRuleProviderErrors); err != nil {
+		return nil, fmt.Errorf("download rule providers: %w", err)
+	}
 	// Apply rules optimizers.
 	log.Infoln("Optimizing and loading routing rules (this may take a while for large rule sets)...")
 	if err := checkCtx("optimize routing rules"); err != nil {
@@ -727,7 +750,14 @@ func NewControlPlaneWithContextOptions(
 	}
 	routingProgram, err := routing.NewNormalizedProgram(routingA.Rules, routingA.Fallback,
 		&routing.AliasOptimizer{},
-		&routing.DatReaderOptimizer{Logger: log, LocationFinder: locationFinder},
+		&routing.DatReaderOptimizer{
+			Logger:                       log,
+			LocationFinder:               locationFinder,
+			RuleProviders:                ruleProviderMap,
+			RuleProviderDir:              ruleProviderDir,
+			RuleProviderDownloadDisabled: buildOpts.IgnoreRuleProviderErrors,
+			SkipUnavailableRuleProviders: buildOpts.IgnoreRuleProviderErrors,
+		},
 		&routing.MergeAndSortRulesOptimizer{},
 		&routing.DeduplicateParamsOptimizer{},
 	)
@@ -899,6 +929,8 @@ func NewControlPlaneWithContextOptions(
 	dnsUpstream, err := dns.New(dnsConfig, &dns.NewOption{
 		Logger:                  log,
 		LocationFinder:          locationFinder,
+		RuleProviders:           ruleProviderMap,
+		RuleProviderDir:         ruleProviderDir,
 		UpstreamReadyCallback:   plane.dnsUpstreamReadyCallback,
 		UpstreamResolverNetwork: common.MagicNetwork("udp", global.SoMarkFromDae, global.Mptcp),
 		UpstreamHostResolver:    upstreamHostResolver,
@@ -1296,6 +1328,216 @@ func (c *ControlPlane) dnsControllerOption() *DnsControllerOption {
 	}
 }
 
+func downloadRuleProvidersThroughRouting(
+	log *logrus.Logger,
+	locationFinder *assets.LocationFinder,
+	routingA *config.Routing,
+	ruleProviderMap map[string]string,
+	ruleProviderDir string,
+	outboundName2Id map[string]uint8,
+	outbounds []*outbound.DialerGroup,
+	global *config.Global,
+	dnsRouter *daedns.Router,
+	force bool,
+	ignoreErrors bool,
+) error {
+	if len(ruleProviderMap) == 0 {
+		return nil
+	}
+	log.Infoln("Loading rule providers...")
+	matcher, err := buildRuleProviderDownloadMatcher(log, locationFinder, routingA, ruleProviderMap, ruleProviderDir, outboundName2Id)
+	if err != nil {
+		return fmt.Errorf("build rule provider download router: %w", err)
+	}
+	return routing.DownloadRuleProvidersWithOptions(ruleProviderMap, routing.DownloadRuleProviderOptions{
+		Dir:          ruleProviderDir,
+		Force:        force,
+		IgnoreErrors: ignoreErrors,
+		HTTPClientResolver: func(name string, rawURL string) (*http.Client, error) {
+			client, outboundName, err := ruleProviderHTTPClientFromRouting(log, name, rawURL, matcher, outbounds, global, dnsRouter)
+			if err != nil {
+				return nil, err
+			}
+			if log != nil {
+				log.Debugf("Download rule provider %q through outbound %q", name, outboundName)
+			}
+			return client, nil
+		},
+	})
+}
+
+func buildRuleProviderDownloadMatcher(
+	log *logrus.Logger,
+	locationFinder *assets.LocationFinder,
+	routingA *config.Routing,
+	ruleProviderMap map[string]string,
+	ruleProviderDir string,
+	outboundName2Id map[string]uint8,
+) (*RoutingMatcher, error) {
+	program, err := routing.NewNormalizedProgram(routingA.Rules, routingA.Fallback,
+		&routing.AliasOptimizer{},
+		&routing.DatReaderOptimizer{
+			Logger:                       log,
+			LocationFinder:               locationFinder,
+			RuleProviders:                ruleProviderMap,
+			RuleProviderDir:              ruleProviderDir,
+			RuleProviderDownloadDisabled: true,
+			SkipUnavailableRuleProviders: true,
+		},
+		&routing.MergeAndSortRulesOptimizer{},
+		&routing.DeduplicateParamsOptimizer{},
+	)
+	if err != nil {
+		return nil, err
+	}
+	builder, err := NewRoutingMatcherBuilderFromProgram(log, program, outboundName2Id, nil)
+	if err != nil {
+		return nil, err
+	}
+	return builder.BuildUserspace()
+}
+
+func ruleProviderHTTPClientFromRouting(
+	log *logrus.Logger,
+	name string,
+	rawURL string,
+	matcher *RoutingMatcher,
+	outbounds []*outbound.DialerGroup,
+	global *config.Global,
+	dnsRouter *daedns.Router,
+) (*http.Client, string, error) {
+	host, port, destAddr, domain, ipVersion, err := ruleProviderDownloadTarget(rawURL)
+	if err != nil {
+		return nil, "", err
+	}
+	wrapDialerWithDNSRouter := false
+	if domain != "" && dnsRouter != nil {
+		resolvedAddr, resolveErr := resolveRuleProviderDownloadAddr(dnsRouter, host)
+		if resolveErr == nil {
+			destAddr = resolvedAddr
+			ipVersion = consts.IpVersionFromAddr(destAddr).ToIpVersionType()
+			wrapDialerWithDNSRouter = true
+		} else if log != nil {
+			log.Warnf("Resolve rule provider %q host %q through bootstrap DNS failed; fall back to placeholder routing: %v", name, host, resolveErr)
+		}
+	}
+
+	srcAddr := netip.MustParseAddr("127.0.0.1")
+	outboundIndex, mark, _, err := matcher.Match(
+		srcAddr.As16(),
+		destAddr.As16(),
+		0,
+		port,
+		ipVersion,
+		consts.L4ProtoType_TCP,
+		domain,
+		[16]uint8{},
+		0,
+		[16]uint8{},
+	)
+	if err != nil {
+		return nil, "", fmt.Errorf("route rule provider URL %q: %w", rawURL, err)
+	}
+	if outboundIndex == consts.OutboundBlock {
+		return nil, "", fmt.Errorf("rule provider URL %q is routed to block", rawURL)
+	}
+	if outboundIndex.IsReserved() && outboundIndex != consts.OutboundDirect {
+		return nil, "", fmt.Errorf("rule provider URL %q is routed to reserved outbound %v", rawURL, outboundIndex)
+	}
+	if int(outboundIndex) >= len(outbounds) {
+		return nil, "", fmt.Errorf("rule provider URL %q is routed to outbound id %v, but only %v outbounds exist", rawURL, outboundIndex, len(outbounds))
+	}
+
+	group := outbounds[outboundIndex]
+	networkType := &dialer.NetworkType{
+		L4Proto:         consts.L4ProtoStr_TCP,
+		IpVersion:       ipVersion.ToIpVersionStr(),
+		IsDns:           false,
+		UdpHealthDomain: dialer.UdpHealthDomainData,
+	}
+	selected, _, _, err := group.SelectWithExclusionResult(networkType, false, nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("select dialer from group %v for rule provider host %q: %w", group.Name, host, err)
+	}
+	if mark == 0 {
+		mark = global.SoMarkFromDae
+	}
+	selectedDialer := netproxy.Dialer(selected)
+	if wrapDialerWithDNSRouter {
+		selectedDialer = dnsRouter.WrapRuleProviderDialer(selectedDialer, host)
+	}
+	return newHTTPClientForRuleProviderDialer(selectedDialer, routing.RuleProviderHTTPTimeout, mark, global.Mptcp), group.Name, nil
+}
+
+func resolveRuleProviderDownloadAddr(dnsRouter *daedns.Router, host string) (netip.Addr, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), routing.RuleProviderHTTPTimeout)
+	defer cancel()
+	ips, err := dnsRouter.LookupRuleProviderIPAddr(ctx, string(consts.L4ProtoStr_TCP), host)
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	for _, ip := range ips {
+		addr, ok := netip.AddrFromSlice(ip.IP)
+		if ok && addr.IsValid() {
+			return addr.Unmap(), nil
+		}
+	}
+	return netip.Addr{}, fmt.Errorf("no usable address returned")
+}
+
+func ruleProviderDownloadTarget(rawURL string) (host string, port uint16, destAddr netip.Addr, domain string, ipVersion consts.IpVersionType, err error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", 0, netip.Addr{}, "", 0, fmt.Errorf("parse rule provider URL %q: %w", rawURL, err)
+	}
+	host = u.Hostname()
+	if host == "" {
+		return "", 0, netip.Addr{}, "", 0, fmt.Errorf("rule provider URL %q has empty host", rawURL)
+	}
+	portText := u.Port()
+	switch {
+	case portText != "":
+		p, parseErr := strconv.ParseUint(portText, 10, 16)
+		if parseErr != nil {
+			return "", 0, netip.Addr{}, "", 0, fmt.Errorf("parse rule provider URL port %q: %w", portText, parseErr)
+		}
+		port = uint16(p)
+	case u.Scheme == "http":
+		port = 80
+	case u.Scheme == "https":
+		port = 443
+	default:
+		return "", 0, netip.Addr{}, "", 0, fmt.Errorf("rule provider URL %q must use http or https", rawURL)
+	}
+
+	if ip, parseErr := netip.ParseAddr(host); parseErr == nil {
+		destAddr = ip
+		ipVersion = consts.IpVersionFromAddr(ip).ToIpVersionType()
+		return host, port, destAddr, "", ipVersion, nil
+	}
+	destAddr = netip.MustParseAddr("0.0.0.0")
+	return host, port, destAddr, host, consts.IpVersion_4, nil
+}
+
+func newHTTPClientForRuleProviderDialer(d netproxy.Dialer, timeout time.Duration, soMark uint32, mptcp bool) *http.Client {
+	soMark = common.EffectiveSoMarkFromDae(soMark)
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				conn, err := d.DialContext(ctx, common.MagicNetwork("tcp", soMark, mptcp), addr)
+				if err != nil {
+					return nil, err
+				}
+				return &netproxy.FakeNetConn{
+					Conn:  conn,
+					LAddr: nil,
+					RAddr: nil,
+				}, nil
+			},
+		},
+		Timeout: timeout,
+	}
+}
 func (c *ControlPlane) dnsUpstreamReadyCallback(dnsUpstream *dns.Upstream) (err error) {
 	if c != nil {
 		c.noteDNSUpstreamAvailable()
