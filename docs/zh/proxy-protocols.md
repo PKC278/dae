@@ -39,6 +39,8 @@ v2ray-plugin 未标记为支持，但其 Websocket（+TLS）子项已标记为�
 
 ShadowTLS v3 链接也可直接使用 `shadowtls://`。
 
+TCP 节点链接可以追加 `tfo=true` 或 `tfo=1`，为该节点连接代理服务器时启用 TCP Fast Open。
+
 需要浏览器式 TLS 指纹的节点可采用以下任一配置方式：
 
 - 设置 `global.tls_implementation: utls`，并保留 `global.utls_imitate` 的默认值 `chrome_auto`。
