@@ -176,3 +176,42 @@ func TestRuleProviderUpdateLoopRetriesAfterRejectedReload(t *testing.T) {
 		t.Fatal("automatic update did not retry on the next period")
 	}
 }
+
+func TestRuleProvidersFullyCached(t *testing.T) {
+	conf := &config.Config{
+		RuleProvider: []config.KeyableString{
+			"a:https://example.com/a.list",
+			"b:https://example.com/b.list",
+		},
+	}
+
+	t.Run("all present", func(t *testing.T) {
+		dir := t.TempDir()
+		for _, name := range []string{"a", "b"} {
+			if err := os.WriteFile(filepath.Join(dir, name+".list"), []byte("x\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !ruleProvidersFullyCached(conf, dir) {
+			t.Fatal("ruleProvidersFullyCached() = false, want true when every provider is cached")
+		}
+	})
+
+	// One missing provider must disqualify the best-effort path: routing cannot
+	// be built from a rule set that is not there, so the refresh must stay fatal.
+	t.Run("one missing", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "a.list"), []byte("x\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if ruleProvidersFullyCached(conf, dir) {
+			t.Fatal("ruleProvidersFullyCached() = true, want false when a provider is missing")
+		}
+	})
+
+	t.Run("no providers", func(t *testing.T) {
+		if ruleProvidersFullyCached(&config.Config{}, t.TempDir()) {
+			t.Fatal("ruleProvidersFullyCached() = true, want false with no providers configured")
+		}
+	})
+}
