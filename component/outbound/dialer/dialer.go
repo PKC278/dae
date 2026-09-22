@@ -218,6 +218,10 @@ type GlobalOption struct {
 	// across reload generations so a replacement control plane never reuses
 	// transports bound to the previous generation's dialer lifecycle.
 	TransportCacheNamespace string
+	// ChainGroups resolves the group a chained node dials through. Nodes are
+	// built before groups exist, so the registry is filled once the groups of
+	// the generation have been created.
+	ChainGroups *ChainGroupRegistry
 
 	metadataMu sync.Mutex
 }
@@ -242,6 +246,9 @@ type InstanceOption struct {
 type Property struct {
 	D.Property
 	SubscriptionTag string
+	// ChainGroup names the group this node is reached through, empty for a
+	// node dialed directly.
+	ChainGroup string
 }
 
 const (
@@ -280,6 +287,7 @@ func NewGlobalOption(global *config.Global, log *logrus.Logger) *GlobalOption {
 		Mptcp:                   global.Mptcp,
 		FallbackResolver:        global.FallbackResolver,
 		TransportCacheNamespace: newTransportCacheNamespace(),
+		ChainGroups:             NewChainGroupRegistry(),
 	}
 }
 
