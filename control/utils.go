@@ -39,7 +39,9 @@ func (c *ControlPlane) Route(src, dst netip.AddrPort, domain string, l4proto con
 	var dscp uint8
 	if routingResult != nil {
 		copy(mac16[10:], routingResult.Mac[:])
-		pname = routingResult.Pname
+		if !shouldIgnoreProcessNameForLanRouting(routingResult) {
+			pname = routingResult.Pname
+		}
 		dscp = routingResult.Dscp
 	}
 	bSrc := src.Addr().As16()
@@ -57,6 +59,10 @@ func (c *ControlPlane) Route(src, dst netip.AddrPort, domain string, l4proto con
 		mac16,
 	)
 	return
+}
+
+func shouldIgnoreProcessNameForLanRouting(routingResult *bpfRoutingResult) bool {
+	return routingResult.Pid == 0 && routingResult.Mac != [6]uint8{} && routingResult.Pname != [16]uint8{}
 }
 
 func bpfTuplesKeyFromAddrPorts(src, dst netip.AddrPort, l4proto uint8) bpfTuplesKey {

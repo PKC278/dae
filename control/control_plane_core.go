@@ -193,6 +193,7 @@ type controlPlaneCore struct {
 	domainRouting             *domainRoutingTracker
 	domainRoutingSlots        [routingEpochSlotCount]*domainRoutingTracker
 	domainRoutingProjectionMu [routingEpochSlotCount]sync.RWMutex
+	domainRoutingDecisionFn   func([]uint32) domainRoutingDecision
 	routingEpochMu            sync.Mutex
 	routingEpochSlot          atomic.Uint32
 	routingEpochPreviousSlot  atomic.Uint32

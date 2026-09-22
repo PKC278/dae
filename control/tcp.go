@@ -210,10 +210,11 @@ func (c *ControlPlane) handleConnWithRoutingResultOwned(
 		domain     string
 		lRelayConn netproxy.Conn = lConn
 	)
-	if c.shouldTryTcpSniff(dst, routingResult) {
+	shouldSniff := c.shouldTryTcpSniff(dst, routingResult)
+	if shouldSniff {
 		cacheKey := newTcpSniffNegKey(dst, routingResult)
 		now := time.Now()
-		if c.shouldSkipTcpSniffByNegativeCache(cacheKey, now) {
+		if c.shouldSkipTcpSniff(routingResult, cacheKey, now) {
 			if c.log.IsLevelEnabled(logrus.TraceLevel) {
 				c.log.WithFields(logrus.Fields{
 					"src": src.String(),
@@ -269,7 +270,6 @@ func (c *ControlPlane) handleConnWithRoutingResultOwned(
 			}
 		}
 	}
-
 	dialParam := tcpProxyDialParamFromRoutingResult(routingResult, domain, src, dst)
 	// Dial and relay.
 	rConn, res, err := c.routeDial(ctx, dialParam)

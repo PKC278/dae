@@ -484,7 +484,7 @@ func (c *controlPlaneCore) finalizePreviousRoutingEpochWithCleanup(cleanup routi
 		bpf := c.PeekBpf()
 		cleanupErr := cleanup(bpf, previous)
 
-		c.domainRoutingSlots[previous] = newDomainRoutingTracker()
+		c.domainRoutingSlots[previous] = c.newDomainRoutingTrackerLocked()
 		if previous == 0 {
 			c.domainRouting = c.domainRoutingSlots[previous]
 		}
@@ -497,6 +497,31 @@ func (c *controlPlaneCore) finalizePreviousRoutingEpochWithCleanup(cleanup routi
 	}
 }
 
+// setDomainRoutingDecisionFn records how a merged domain bitmap resolves to a
+// routing decision. Every domain routing tracker, including the ones a later
+// epoch rotation creates, needs it to tell an address whose domains agree from
+// one whose domains disagree.
+func (c *controlPlaneCore) setDomainRoutingDecisionFn(fn func([]uint32) domainRoutingDecision) {
+	if c == nil {
+		return
+	}
+	c.routingEpochMu.Lock()
+	c.domainRoutingDecisionFn = fn
+	trackers := c.domainRoutingSlots
+	c.routingEpochMu.Unlock()
+	for _, tracker := range trackers {
+		tracker.setDecisionFromMergedBitmap(fn)
+	}
+}
+
+// newDomainRoutingTrackerLocked creates a tracker already wired to this core's
+// decision function. routingEpochMu must be held.
+func (c *controlPlaneCore) newDomainRoutingTrackerLocked() *domainRoutingTracker {
+	tracker := newDomainRoutingTracker()
+	tracker.setDecisionFromMergedBitmap(c.domainRoutingDecisionFn)
+	return tracker
+}
+
 func (c *controlPlaneCore) domainRoutingTrackerForSlot(slot uint32) *domainRoutingTracker {
 	if c == nil || !validRoutingEpochSlot(slot) {
 		return nil
@@ -507,7 +532,7 @@ func (c *controlPlaneCore) domainRoutingTrackerForSlot(slot uint32) *domainRouti
 		c.domainRoutingSlots[slot] = c.domainRouting
 	}
 	if c.domainRoutingSlots[slot] == nil {
-		c.domainRoutingSlots[slot] = newDomainRoutingTracker()
+		c.domainRoutingSlots[slot] = c.newDomainRoutingTrackerLocked()
 		if slot == 0 {
 			c.domainRouting = c.domainRoutingSlots[slot]
 		}
@@ -520,7 +545,7 @@ func (c *controlPlaneCore) resetDomainRoutingSlot(slot uint32) {
 		return
 	}
 	c.routingEpochMu.Lock()
-	c.domainRoutingSlots[slot] = newDomainRoutingTracker()
+	c.domainRoutingSlots[slot] = c.newDomainRoutingTrackerLocked()
 	if slot == 0 {
 		c.domainRouting = c.domainRoutingSlots[slot]
 	}
