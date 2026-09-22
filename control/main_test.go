@@ -50,6 +50,11 @@ func TestMain(m *testing.M) {
 		goleak.IgnoreAnyFunction("github.com/panjf2000/ants/v2.(*poolCommon).ticktock"),
 		// outbound package init background goroutine.
 		goleak.IgnoreAnyFunction("github.com/daeuniverse/dae/component/outbound/dialer.init.0.func1"),
+		// mihomo, which backs the VLESS outbound, starts a process-global
+		// traffic statistic manager and its observable from package init. Both
+		// live for the process lifetime and have no stop API.
+		goleak.IgnoreAnyFunction("github.com/metacubex/mihomo/tunnel/statistic.(*Manager).handle"),
+		goleak.IgnoreAnyFunction("github.com/metacubex/mihomo/common/observable.(*Observable[...]).process"),
 		// The fork's direct-dial packet receiver registry is a process-global
 		// epoll loop with no stop API (one loop shared by every direct
 		// endpoint, alive for the process lifetime). Tests that dial a real
