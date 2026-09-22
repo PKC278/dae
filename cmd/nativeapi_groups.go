@@ -130,6 +130,8 @@ func policyKind(policy consts.DialerSelectionPolicy) string {
 		return "fixed"
 	case consts.DialerSelectionPolicy_Random:
 		return "random"
+	case consts.DialerSelectionPolicy_Fallback:
+		return "fallback"
 	default:
 		return "urltest"
 	}

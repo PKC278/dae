@@ -36,6 +36,9 @@ const (
 	// configured index is only the initial choice; it is never written back to
 	// the configuration and is reset on reload.
 	DialerSelectionPolicy_Select DialerSelectionPolicy = "select"
+	// DialerSelectionPolicy_Fallback selects the first alive dialer following the
+	// order the group declares, so nodes act as an explicit priority chain.
+	DialerSelectionPolicy_Fallback DialerSelectionPolicy = "fallback"
 )
 
 // IgnoresDialerHealth reports whether the policy picks a member without
@@ -50,6 +53,7 @@ func (p DialerSelectionPolicy) IgnoresDialerHealth() bool {
 func (p DialerSelectionPolicy) SupportsOverride() bool {
 	switch p {
 	case DialerSelectionPolicy_Random,
+		DialerSelectionPolicy_Fallback,
 		DialerSelectionPolicy_MinLastLatency,
 		DialerSelectionPolicy_MinAverage10Latencies,
 		DialerSelectionPolicy_MinMovingAverageLatencies:
