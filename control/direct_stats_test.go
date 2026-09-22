@@ -104,7 +104,9 @@ func TestDirectStatsPriorityRunsBeforeTproxy(t *testing.T) {
 	if directStatsPriority != 1 {
 		t.Fatalf("directStatsPriority = %d; the observer must own the lowest priority", directStatsPriority)
 	}
-	for _, want := range []string{"dualPriority = 2", "ingressPriority = 2", "egressPriority = 2"} {
+	// WAN ingress always sits at priority 2 behind the NAT filters, so it
+	// yields to the observer without a conditional assignment.
+	for _, want := range []string{"dualPriority = 2", "ingressPriority := uint16(2)", "egressPriority = 2"} {
 		if !strings.Contains(mustReadBindSource(t), want) {
 			t.Errorf("bind source does not set %q; tproxy must yield to the observer when it is on", want)
 		}
