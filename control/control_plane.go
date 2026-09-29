@@ -845,6 +845,7 @@ func NewControlPlaneWithContextOptions(
 	// Get referenced outbounds to limit health checks.
 	referencedOutbounds := builder.GetReferencedOutbounds()
 	if len(referencedOutbounds) > 0 {
+		includeChainCarriers(referencedOutbounds, outbounds)
 		var names []string
 		for name := range referencedOutbounds {
 			names = append(names, name)
