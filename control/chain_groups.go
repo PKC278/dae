@@ -58,6 +58,40 @@ func validateChainGroups(outbounds []*outbound.DialerGroup, allDialers []*dialer
 	return validateChainGroupGraph(edges)
 }
 
+// includeChainCarriers adds to referenced every group that a node of an already
+// referenced group is chained through, following the chain to its end. Health
+// checks only run for referenced groups, and a group that only carries a chain
+// is never named by a routing rule, so without this its nodes would keep their
+// initial state and the chain could not fail over when the selected hop dies.
+func includeChainCarriers(referenced map[string]struct{}, outbounds []*outbound.DialerGroup) {
+	byName := make(map[string]*outbound.DialerGroup, len(outbounds))
+	for _, group := range outbounds {
+		byName[group.Name] = group
+	}
+	queue := make([]string, 0, len(referenced))
+	for name := range referenced {
+		queue = append(queue, name)
+	}
+	for len(queue) > 0 {
+		group := byName[queue[0]]
+		queue = queue[1:]
+		if group == nil {
+			continue
+		}
+		for _, d := range group.Dialers {
+			property := d.Property()
+			if property == nil || property.ChainGroup == "" {
+				continue
+			}
+			if _, ok := referenced[property.ChainGroup]; ok {
+				continue
+			}
+			referenced[property.ChainGroup] = struct{}{}
+			queue = append(queue, property.ChainGroup)
+		}
+	}
+}
+
 // validateChainGroupGraph reports the first chain loop it finds. Group names
 // are visited in a stable order so the same configuration always names the
 // same loop.
