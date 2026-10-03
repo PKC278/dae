@@ -244,8 +244,10 @@ var (
 			}
 
 			// Read config from --config cfgFile.
+			_ = setRunSignalProgress(consts.ReloadProcessing, "正在启动 dae")
 			conf, includes, err := readConfig(cfgFile)
 			if err != nil {
+				_ = setRunSignalProgress(consts.ReloadError, err.Error())
 				logrus.WithFields(logrus.Fields{
 					"err": err,
 				}).Fatalln("Failed to read config")

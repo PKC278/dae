@@ -22,7 +22,7 @@ type dnsControllerRuntimeState struct {
 	newCache                func(fqdn string, answers, ns, extra []dnsmessage.RR, deadline time.Time, originalDeadline time.Time) (cache *DnsCache, err error)
 	routeProjectionEpoch    uint64
 	routeProjectionHash     [32]byte
-	projectCacheRoute       func(cache *DnsCache) []uint32
+	projectCacheRoute       func(cache *DnsCache) ([]uint32, domainRoutingDecision)
 	bestDialerChooser       func(ctx context.Context, snapshot DnsRequestSnapshot, upstream *dns.Upstream) (*dialArgument, error)
 	timeoutExceedCallback   func(dialArgument *dialArgument, err error)
 	fixedDomainTtl          map[string]int

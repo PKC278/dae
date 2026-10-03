@@ -377,6 +377,9 @@ func (o *DatReaderOptimizer) downloadAndStoreRuleProviderContent(name string) ([
 	if len(b) > maxRuleProviderSize {
 		return nil, fmt.Errorf("rule provider %q is too large", name)
 	}
+	if !isTextRuleProviderContent(b) {
+		return nil, fmt.Errorf("rule provider %q is not valid UTF-8 text", name)
+	}
 	if err = o.storeRuleProviderContent(name, b); err != nil {
 		return nil, err
 	}

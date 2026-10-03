@@ -218,7 +218,7 @@ func (ue *UdpEndpoint) handleReceivedPacket(packet *netproxy.ReceivedPacket) boo
 	}
 
 	ue.softErrorCount = 0
-	from := packet.From
+	from := ue.replySource(packet.From)
 	if !ue.hasReply.Load() && !ue.acceptsInitialReplyFrom(from) {
 		packet.Release()
 		return true
@@ -273,6 +273,7 @@ func (ue *UdpEndpoint) startReadLoop() {
 			continue
 		}
 		ue.softErrorCount = 0
+		from = ue.replySource(from)
 		if !ue.hasReply.Load() && !ue.acceptsInitialReplyFrom(from) {
 			if ue.log != nil && ue.log.IsLevelEnabled(logrus.DebugLevel) {
 				ue.log.WithFields(logrus.Fields{

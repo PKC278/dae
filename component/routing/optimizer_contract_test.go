@@ -595,3 +595,28 @@ func assertParamMissing(t *testing.T, params []*config_parser.Param, key, val st
 		}
 	}
 }
+
+func TestForcedRuleProviderDownloadPreservesCacheOnBinaryResponse(t *testing.T) {
+	for _, content := range [][]byte{{0xff, 0xfe}, []byte("example.com\x00")} {
+		t.Run(fmt.Sprintf("%x", content), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write(content)
+			}))
+			defer server.Close()
+			dir := t.TempDir()
+			path := filepath.Join(dir, "test.list")
+			const original = "example.com\n"
+			if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+				t.Fatal(err)
+			}
+			o := &DatReaderOptimizer{RuleProviders: map[string]string{"test": server.URL}, RuleProviderDir: dir, RuleProviderDownloadForced: true}
+			if _, err := o.loadRuleProviderContent("test"); err == nil {
+				t.Fatal("binary download was accepted")
+			}
+			got, err := os.ReadFile(path)
+			if err != nil || string(got) != original {
+				t.Fatalf("cached rules changed: %q, err=%v", got, err)
+			}
+		})
+	}
+}

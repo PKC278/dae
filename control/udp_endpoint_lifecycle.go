@@ -867,6 +867,21 @@ func (ue *UdpEndpoint) acceptsInitialReplyFrom(from netip.AddrPort) bool {
 	return false
 }
 
+func (ue *UdpEndpoint) replySource(from netip.AddrPort) netip.AddrPort {
+	if from.IsValid() || ue.requiresInitialReplyGuard() || !ue.poolKey.Dst.IsValid() || ue.poolKey.Dst.Port() == 0 {
+		return from
+	}
+	host, _, err := net.SplitHostPort(ue.DialTarget)
+	if err != nil || host == "" {
+		return from
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return from
+	}
+	// XUDP 的域名目标可能不携带可表示为 IP 的响应来源，回填透明代理前的目标以便向客户端重注入。
+	return ue.poolKey.Dst
+}
+
 func (ue *UdpEndpoint) setExpiry(deadlineNano int64) {
 	ue.expiresAtNano.Store(deadlineNano)
 	ue.refreshCachedResponseConnsWithTime(deadlineNano)
