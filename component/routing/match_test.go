@@ -282,3 +282,23 @@ func TestMatchRulesUsesRuntimeScalarSemantics(t *testing.T) {
 		})
 	}
 }
+
+func TestMatchRulesReportsSourceIPRuleProvider(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("192.0.2.0/24\n"))
+	}))
+	defer server.Close()
+	rules := []*config_parser.RoutingRule{{
+		AndFunctions: []*config_parser.Function{{Name: "sip", Params: []*config_parser.Param{{Key: "rule-set", Val: "test"}}}},
+		Outbound:     config_parser.Function{Name: "direct"},
+	}}
+	report, err := MatchRules(rules, "proxy", MatchInput{
+		Scope: "routing", Function: &config_parser.Function{Name: "sip", Params: []*config_parser.Param{{Val: "192.0.2.10"}}},
+	}, MatchOption{Logger: logrus.New(), RuleProviders: map[string]string{"test": server.URL}, RuleProviderDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Hit == nil || report.Hit.Action != "direct" || report.Hit.Source.Name != "test" {
+		t.Fatalf("unexpected match: %+v", report.Hit)
+	}
+}

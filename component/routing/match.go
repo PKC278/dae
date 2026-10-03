@@ -296,7 +296,7 @@ func expandRuleSetSourcedParams(functionName string, name string, optimizer *Dat
 		switch functionName {
 		case consts.Function_Domain, consts.Function_QName:
 			param, ok = parseRuleProviderDomain(line)
-		case consts.Function_Ip:
+		case consts.Function_Ip, consts.Function_SourceIp:
 			param, ok = parseRuleProviderIPCIDR(line)
 		default:
 			return nil, fmt.Errorf("rule-set is unsupported in function %v", functionName)

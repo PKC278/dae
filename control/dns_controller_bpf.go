@@ -181,7 +181,7 @@ func (c *DnsController) reprojectCachedRoutes(rt *dnsControllerRuntimeState) {
 		replacement := cache.CloneForReload()
 		ensureDNSCacheRouteOwnerKey(cacheKey, replacement)
 		replacement.RouteProjectionEpoch = rt.routeProjectionEpoch
-		replacement.DomainBitmap = rt.projectCacheRoute(replacement)
+		replacement.DomainBitmap, replacement.DomainRoutingDecision = rt.projectCacheRoute(replacement)
 
 		// Pair the rebuilt bitmap with the runtime that supplied its epoch.
 		// A reload can replace the runtime while the matcher is running, in
