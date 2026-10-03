@@ -128,21 +128,23 @@ func (c *ControlPlane) projectDnsReloadCacheStream(
 			return nil
 		}
 		bitmap := cache.DomainBitmap
+		decision := cache.DomainRoutingDecision
 		if !reuseBitmap || len(bitmap) != len(bpfDomainRouting{}.Bitmap) {
 			if c.routingMatcher == nil || c.routingMatcher.domainMatcher == nil {
 				return fmt.Errorf("project DNS reload cache without domain matcher")
 			}
-			bitmap = c.routingMatcher.domainMatcher.MatchDomainBitmap(cache.GetFqdn())
+			bitmap, decision = c.routingMatcher.DomainRoutingDecision(cache.GetFqdn())
 		}
 		ownerKey := cache.RouteOwnerKey
 		if ownerKey == "" {
 			ownerKey = cacheKey
 		}
 		projected := DnsCache{
-			RouteOwnerKey:        ownerKey,
-			RouteProjectionEpoch: uint64(c.PolicyEpoch()),
-			DomainBitmap:         bitmap,
-			Answer:               cache.Answer,
+			RouteOwnerKey:         ownerKey,
+			RouteProjectionEpoch:  uint64(c.PolicyEpoch()),
+			DomainBitmap:          bitmap,
+			DomainRoutingDecision: decision,
+			Answer:                cache.Answer,
 		}
 		if err := c.core.BatchUpdateDomainRouting(&projected); err != nil {
 			return fmt.Errorf("project streamed DNS cache %q: %w", cacheKey, err)
