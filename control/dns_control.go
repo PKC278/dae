@@ -78,7 +78,8 @@ type DnsControllerOption struct {
 	// without walking or cloning the DNS cache when only the generation epoch
 	// changed.
 	RouteProjectionHash [32]byte
-	ProjectCacheRoute   func(cache *DnsCache) []uint32
+	// 位图和决策必须来自同一代规则，否则共享 IP 的冲突判断会沿用旧出口。
+	ProjectCacheRoute func(cache *DnsCache) ([]uint32, domainRoutingDecision)
 	// BestDialerChooser is the transport-independent dialer selector: it takes
 	// the routing facts of the request rather than its socket.
 	BestDialerChooser     func(ctx context.Context, snapshot DnsRequestSnapshot, upstream *dns.Upstream) (*dialArgument, error)

@@ -260,9 +260,10 @@ func (c *DnsController) restoreReloadCache(entries map[string]*DnsCache, matchDo
 			}
 			switch {
 			case rt != nil && rt.projectCacheRoute != nil:
-				restored.DomainBitmap = rt.projectCacheRoute(restored)
+				restored.DomainBitmap, restored.DomainRoutingDecision = rt.projectCacheRoute(restored)
 			case matchDomainBitmap != nil:
 				restored.DomainBitmap = matchDomainBitmap(restored.GetFqdn())
+				restored.DomainRoutingDecision = domainRoutingDecision{}
 			case v.DomainBitmap != nil:
 				restored.DomainBitmap = append([]uint32(nil), v.DomainBitmap...)
 			}

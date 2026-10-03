@@ -1316,11 +1316,11 @@ func (c *ControlPlane) dnsControllerOption() *DnsControllerOption {
 		},
 		RouteProjectionEpoch: routeProjectionEpoch,
 		RouteProjectionHash:  policyIdentity.Hash(),
-		ProjectCacheRoute: func(cache *DnsCache) []uint32 {
+		ProjectCacheRoute: func(cache *DnsCache) ([]uint32, domainRoutingDecision) {
 			if cache == nil {
-				return nil
+				return nil, domainRoutingDecision{}
 			}
-			return c.routingMatcher.domainMatcher.MatchDomainBitmap(cache.GetFqdn())
+			return c.routingMatcher.DomainRoutingDecision(cache.GetFqdn())
 		},
 		NewCache: func(fqdn string, answers, ns, extra []dnsmessage.RR, deadline time.Time, originalDeadline time.Time) (cache *DnsCache, err error) {
 			domainBitmap, domainDecision := c.routingMatcher.DomainRoutingDecision(fqdn)
