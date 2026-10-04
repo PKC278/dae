@@ -205,6 +205,29 @@ upstream. Record TTLs in those answers are bounded by
 `optimistic_stale_reply_ttl` (default `30`). Set `optimistic_cache: false` to
 send every query for that domain to upstream synchronously.
 
+## Upstream outbound
+
+By default, the connection dae opens to a DNS upstream is matched by the main `routing` section. The match uses the upstream's IP, port, protocol and hostname, together with the `sip`, `mac`, `pname` and `dscp` of the client that sent the query. An upstream may carry an `[outbound: <group>]` annotation to name the outbound group used to reach it:
+
+```shell
+dns {
+  upstream {
+    alidns: 'udp://223.5.5.5:53' [outbound: direct]
+    google_hk: 'tcp+udp://dns.google:53' [outbound: hk_group]
+    google_us: 'tcp+udp://dns.google:53' [outbound: us_group]
+  }
+  routing {
+    request {
+      qname(geosite:cn) -> alidns
+      qname(geosite:netflix) -> google_us
+      fallback: google_hk
+    }
+  }
+}
+```
+
+An annotated upstream skips the main `routing` and is dialed through the named group, so one upstream address can be reached through different groups under different names. Each name keeps its own DNS cache. `outbound` must be `direct` or a group defined in `group`; `block` is rejected, and refusing a query is expressed by `reject` in `request`. Upstreams without the annotation behave as before. dae's own lookups for subscription hosts and node server hostnames always dial directly and ignore the annotation.
+
 ## Bootstrap resolver (`global`)
 
 dae queries `global.bootstrap_resolver` directly, never through a proxy, for

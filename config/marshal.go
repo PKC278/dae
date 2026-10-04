@@ -64,7 +64,13 @@ func (m *Marshaller) marshalStringList(from reflect.Value, depth int, keyable bo
 		if keyable {
 			tag, afterTag := common.GetTagFromLinkLikePlaintext(str.String())
 			if len(tag) > 0 {
-				m.writeLine(depth, tag+":"+strconv.Quote(afterTag))
+				p := &config_parser.Param{Key: tag, Val: afterTag}
+				// A value whose bracketed suffix is not a well-formed annotation,
+				// such as a node link named "HK [1]", is kept verbatim.
+				if body, annotation, err := SplitKeyableAnnotation(afterTag); err == nil {
+					p.Val, p.Annotation = body, annotation
+				}
+				m.writeLine(depth, p.String(true, true))
 				continue
 			}
 		}
