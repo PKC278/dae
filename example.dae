@@ -246,6 +246,10 @@ dns {
         alidns: 'udp://dns.alidns.com:53'
         googledns: 'tcp+udp://dns.google:53'
 
+        # Append [outbound: <group>] to dial an upstream through that group instead of matching it against the
+        # main routing. The same address may be declared under several names bound to different groups.
+        # googledns_hk: 'tcp+udp://dns.google:53' [outbound: my_group]
+
         # alih3: 'h3://dns.alidns.com:443'
         # alih3_path: 'h3://dns.alidns.com:443/dns-query'
         # alihttp3: 'http3://dns.alidns.com:443'

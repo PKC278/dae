@@ -341,6 +341,11 @@ func (c *DnsController) responseCacheKey(baseKey string, req *udpRequest, upstre
 		switch {
 		case upstream != nil:
 			scope = "upstream@" + upstream.String()
+			// Answers are often geo-dependent, so the same upstream reached
+			// through different groups must not share cached answers.
+			if upstream.Outbound != "" {
+				scope += "@" + upstream.Outbound
+			}
 		case upstreamIndex != 0:
 			scope = "upstream-index@" + strconv.Itoa(int(upstreamIndex))
 		}

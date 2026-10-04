@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"sync"
 
-	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/assets"
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/common/netutils"
@@ -66,12 +65,11 @@ func New(dns *config.Dns, opt *NewOption) (s *Dns, err error) {
 			return nil, fmt.Errorf("too many upstreams")
 		}
 
-		tag, link := common.GetTagFromLinkLikePlaintext(string(upstreamRaw))
-		if tag == "" {
-			return nil, fmt.Errorf("%w: '%v' has no tag", ErrBadUpstreamFormat, upstreamRaw)
+		decl, err := ParseUpstreamDeclaration(upstreamRaw)
+		if err != nil {
+			return nil, err
 		}
-		var u *url.URL
-		u, err = url.Parse(link)
+		u, err := url.Parse(decl.Link)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrBadUpstreamFormat, err)
 		}
@@ -79,6 +77,7 @@ func New(dns *config.Dns, opt *NewOption) (s *Dns, err error) {
 			Raw:         u,
 			Network:     opt.UpstreamResolverNetwork,
 			ResolveIp46: opt.UpstreamHostResolver,
+			Outbound:    decl.Outbound,
 			FinishInitCallback: func(i int) func(raw *url.URL, upstream *Upstream) (err error) {
 				return func(raw *url.URL, upstream *Upstream) (err error) {
 					if opt.UpstreamReadyCallback != nil { // Redundant comparison 'opt != nil' removed
@@ -92,9 +91,9 @@ func New(dns *config.Dns, opt *NewOption) (s *Dns, err error) {
 				}
 			}(i),
 		}
-		upstreamName2Id[tag] = uint8(len(s.upstream))
+		upstreamName2Id[decl.Tag] = uint8(len(s.upstream))
 		s.upstream = append(s.upstream, r)
-		s.upstreamTags = append(s.upstreamTags, tag)
+		s.upstreamTags = append(s.upstreamTags, decl.Tag)
 	}
 	if opt.RequestMatcher == nil {
 		requestProgram, err := NewNormalizedRequestRoutingProgram(dns.Routing.Request.Rules, dns.Routing.Request.Fallback,

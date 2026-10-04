@@ -428,6 +428,9 @@ func (e *configEditor) fullValidate(conf *config.Config) error {
 	if err := dns.ValidateRouting(e.log, &conf.Dns, []string{e.baseDir}, ruleProviders, ruleProviderDir); err != nil {
 		return err
 	}
+	if err := validateDnsUpstreamOutbounds(conf); err != nil {
+		return err
+	}
 	return validateFixedDomainTtl(conf)
 }
 

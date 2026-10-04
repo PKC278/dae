@@ -369,11 +369,15 @@ func (r *Router) initUpstreams(rawUpstreams []config.KeyableString) error {
 		resolveIp46 = nil
 	}
 	for _, upstreamRaw := range rawUpstreams {
-		tag, link := common.GetTagFromLinkLikePlaintext(string(upstreamRaw))
-		if tag == "" {
-			continue
+		// dae's own lookups resolve node and subscription hosts before any
+		// group can carry traffic, so they always dial directly and ignore the
+		// upstream's outbound annotation.
+		decl, err := componentdns.ParseUpstreamDeclaration(upstreamRaw)
+		if err != nil {
+			return err
 		}
-		u, err := url.Parse(link)
+		tag := decl.Tag
+		u, err := url.Parse(decl.Link)
 		if err != nil {
 			return fmt.Errorf("bad dns upstream %q: %w", upstreamRaw, err)
 		}

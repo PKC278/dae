@@ -90,6 +90,9 @@ type Upstream struct {
 	Port     uint16
 	Path     string
 	*netutils.Ip46
+	// Outbound is the group bound by the `outbound` annotation. When set, the
+	// upstream is dialed through this group and the main routing is skipped.
+	Outbound string
 }
 
 func NewUpstream(ctx context.Context, upstream *url.URL, resolverNetwork string, resolveIp46 resolveUpstreamIp46Func) (up *Upstream, err error) {
@@ -161,6 +164,7 @@ type UpstreamResolver struct {
 	Raw         *url.URL
 	Network     string
 	ResolveIp46 resolveUpstreamIp46Func
+	Outbound    string
 	// FinishInitCallback may be invoked again if err is not nil
 	FinishInitCallback func(raw *url.URL, upstream *Upstream) (err error)
 
@@ -236,6 +240,7 @@ func (u *UpstreamResolver) initUpstream(ctx context.Context) (*Upstream, error) 
 		u.state.Store(&errorSentinel)
 		return nil, fmt.Errorf("failed to init dns upstream: %w", err)
 	}
+	upstream.Outbound = u.Outbound
 
 	// Call finish callback if set
 	if u.FinishInitCallback != nil {
