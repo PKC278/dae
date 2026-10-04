@@ -178,6 +178,29 @@ dns {
 
 `fixed_domain_ttl` 设为 `0` 不会关闭缓存。dae 仍会保存响应，并把缓存截止时间设为收到响应的时刻，因此该条目在下次查询时已经过期。`optimistic_cache` 默认为 `true`。因此在 `optimistic_cache_ttl`（默认 `60` 秒；`0` 表示不限）内，dae 用这条过期条目回答后续查询，并在后台向上游刷新一次。回复中的记录 TTL 不超过 `optimistic_stale_reply_ttl`（默认 `30`）。设置 `optimistic_cache: false` 后，该域名的每次查询都同步发往上游。
 
+## 上游出站
+
+默认情况下，dae 连接 DNS 上游时，会把这条连接交给主 `routing` 匹配，匹配条件包括上游的 IP、端口、协议和主机名，以及发起查询的客户端的 `sip`、`mac`、`pname`、`dscp`。上游后可以追加 `[outbound: <group>]` 注解，指定连接该上游所用的出站组：
+
+```shell
+dns {
+  upstream {
+    alidns: 'udp://223.5.5.5:53' [outbound: direct]
+    google_hk: 'tcp+udp://dns.google:53' [outbound: hk_group]
+    google_us: 'tcp+udp://dns.google:53' [outbound: us_group]
+  }
+  routing {
+    request {
+      qname(geosite:cn) -> alidns
+      qname(geosite:netflix) -> google_us
+      fallback: google_hk
+    }
+  }
+}
+```
+
+带注解的上游不再经过主 `routing`，直接由指定的组选择节点，因此同一个上游地址可以用不同的名称经不同的组访问。各名称的 DNS 缓存相互独立。`outbound` 必须是 `direct` 或 `group` 中定义的组；`block` 不被接受，拒绝查询应在 `request` 中使用 `reject`。未带注解的上游保持原有行为。dae 自身的内部查询（订阅主机、节点服务器主机名）始终直连，忽略该注解。
+
 ## 引导解析器（`global`）
 
 三类查询由 dae 直接发往 `global.bootstrap_resolver`，从不经过代理。第一类是 `dns.upstream` 中非 IP 字面量条目的主机名。第二类是 `dial_mode: domain`（默认值）对嗅探到的域名执行的后台探测，前提是 dae 的 DNS 缓存中没有该域名的 `A` 或 `AAAA` 记录。`domain+` 和 `domain++` 跳过该探测；`ip` 从不按域名建立连接。`dial_mode` 只接受 `ip`、`domain`、`domain+` 和 `domain++`。

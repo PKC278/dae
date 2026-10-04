@@ -757,6 +757,12 @@ func NewControlPlaneWithContextOptions(
 		outboundName2Id[o.Name] = uint8(i)
 		outboundId2Name[uint8(i)] = o.Name
 	}
+	if err := dns.ValidateUpstreamOutbounds(dnsConfig, func(name string) bool {
+		_, ok := outboundName2Id[name]
+		return ok
+	}); err != nil {
+		return nil, err
+	}
 	ruleProvidersDownloaded, err := downloadRuleProvidersThroughRouting(log, locationFinder, routingA, ruleProviderMap, ruleProviderDir, outboundName2Id, outbounds, global, buildOpts.RuleProviderDNSRouter, buildOpts.ForceRuleProviderDownload, buildOpts.IgnoreRuleProviderErrors, buildOpts.BestEffortRuleProviderRefresh)
 	if err != nil {
 		return nil, fmt.Errorf("download rule providers: %w", err)
@@ -1657,6 +1663,7 @@ func (c *ControlPlane) dnsUpstreamReadyCallback(dnsUpstream *dns.Upstream) (err 
 type dnsDialerSnapshotKey struct {
 	realSrc      netip.AddrPort
 	upstream     string
+	outbound     string
 	upstreamIp4  netip.Addr
 	upstreamIp6  netip.Addr
 	routingPname [16]uint8
@@ -1721,6 +1728,7 @@ func buildDnsDialerSnapshotKeyForSnapshot(snapshot DnsRequestSnapshot, upstream 
 	key := dnsDialerSnapshotKey{
 		realSrc:     realSrc,
 		upstream:    upstream.String(),
+		outbound:    upstream.Outbound,
 		upstreamIp4: upstream.Ip4,
 		upstreamIp6: upstream.Ip6,
 	}
@@ -3140,6 +3148,21 @@ func (c *ControlPlane) chooseBestDnsDialerSnapshot(
 		bestCandidate          *dnsDialerCandidate
 		bestPenalizedCandidate *dnsDialerCandidate
 	)
+	// An upstream bound to a group by its outbound annotation bypasses the
+	// main routing, so one upstream address can be reached through different
+	// groups under different aliases.
+	boundOutbound := -1
+	if dnsUpstream.Outbound != "" {
+		for i, o := range c.outbounds {
+			if o.Name == dnsUpstream.Outbound {
+				boundOutbound = i
+				break
+			}
+		}
+		if boundOutbound == -1 {
+			return nil, fmt.Errorf("outbound (group) %v of DNS upstream %v not found", strconv.Quote(dnsUpstream.Outbound), dnsUpstream.String())
+		}
+	}
 	// Get the min latency path.
 	networkType := dialer.NetworkType{
 		IsDns:           true,
@@ -3158,18 +3181,30 @@ func (c *ControlPlane) chooseBestDnsDialerSnapshot(
 			default:
 				return nil, fmt.Errorf("unexpected ipversion: %v", ver)
 			}
-			outboundIndex, mark, _, drop, err := c.Route(
-				snapshot.RealSrc,
-				netip.AddrPortFrom(dAddr, dnsUpstream.Port),
-				dnsUpstream.Hostname,
-				proto.ToL4ProtoType(),
-				snapshot.routingResultForRoute(),
+			var (
+				outboundIndex consts.OutboundIndex
+				mark          uint32
 			)
-			if err != nil {
-				return nil, err
-			}
-			if drop {
-				return nil, errBlockDrop
+			if boundOutbound >= 0 {
+				outboundIndex = consts.OutboundIndex(boundOutbound)
+			} else {
+				var (
+					drop bool
+					err  error
+				)
+				outboundIndex, mark, _, drop, err = c.Route(
+					snapshot.RealSrc,
+					netip.AddrPortFrom(dAddr, dnsUpstream.Port),
+					dnsUpstream.Hostname,
+					proto.ToL4ProtoType(),
+					snapshot.routingResultForRoute(),
+				)
+				if err != nil {
+					return nil, err
+				}
+				if drop {
+					return nil, errBlockDrop
+				}
 			}
 			if mark == 0 {
 				mark = c.soMarkFromDae

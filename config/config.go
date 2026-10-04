@@ -148,6 +148,31 @@ func KeyableStringMap(values []KeyableString) (map[string]string, error) {
 	return m, nil
 }
 
+// SplitKeyableAnnotation separates the trailing annotation from the value part
+// of a KeyableString. The section parser flattens `key: 'value' [k: v]` into
+// "key:value [k:v]", so the annotation is recognized only after the " ["
+// separator it emits; a bracket that is part of the value, such as an IPv6
+// literal in "udp://[::1]", is never preceded by a space.
+func SplitKeyableAnnotation(value string) (body string, annotation []*config_parser.Param, err error) {
+	if !strings.HasSuffix(value, "]") {
+		return value, nil, nil
+	}
+	i := strings.LastIndex(value, " [")
+	if i == -1 {
+		return value, nil, nil
+	}
+	body = value[:i]
+	for item := range strings.SplitSeq(value[i+2:len(value)-1], ",") {
+		k, v, ok := strings.Cut(item, ":")
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if !ok || k == "" || v == "" {
+			return "", nil, fmt.Errorf("invalid annotation %q in %q", strings.TrimSpace(item), value)
+		}
+		annotation = append(annotation, &config_parser.Param{Key: k, Val: v})
+	}
+	return body, annotation, nil
+}
+
 // Dns is intentionally mirrored by cmd.dnsConfigFingerprint for staged reload
 // DNS reuse decisions. Only routing-affecting fields are covered by the
 // fingerprint; runtime-tunable parameters (OptimisticCache, OptimisticCacheTtl,

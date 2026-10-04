@@ -60,6 +60,10 @@ var (
 				fmt.Println(err)
 				os.Exit(1)
 			}
+			if err := validateDnsUpstreamOutbounds(conf); err != nil {
+				fmt.Println(err)
+				os.Exit(1)
+			}
 			// dns.fixed_domain_ttl is the remaining run-path parse the DNS
 			// block owns: control.ParseFixedDomainTtl runs inside
 			// NewControlPlane and aborts the whole control plane on a bad
@@ -163,6 +167,26 @@ func validateRoutingRules(log *logrus.Logger, conf *config.Config, externGeoData
 		return fmt.Errorf("invalid routing rules: %w", err)
 	}
 	return nil
+}
+
+// validateDnsUpstreamOutbounds resolves the outbound annotations of
+// dns.upstream against the same namespace the control plane builds: the
+// implicit direct and block groups plus every configured group name.
+func validateDnsUpstreamOutbounds(conf *config.Config) error {
+	if conf == nil {
+		return fmt.Errorf("nil config")
+	}
+	return dns.ValidateUpstreamOutbounds(&conf.Dns, func(name string) bool {
+		if name == consts.OutboundDirect.String() || name == consts.OutboundBlock.String() {
+			return true
+		}
+		for _, group := range conf.Group {
+			if group.Name == name {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 // validateFixedDomainTtl is the dry-run of the dns.fixed_domain_ttl parsing
