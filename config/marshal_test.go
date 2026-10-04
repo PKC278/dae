@@ -322,3 +322,96 @@ func TestMarshalLeafInterfaceFunctionShapes(t *testing.T) {
 		t.Fatal("unsupported leaf shape must fail loudly, not be dropped")
 	}
 }
+
+func TestMarshalPreservesDnsUpstreamAnnotation(t *testing.T) {
+	sections, err := config_parser.Parse(`
+global {}
+dns {
+    upstream {
+        hk: 'tcp+udp://dns.google:53' [outbound: hk_group]
+        v6: 'udp://[2001:4860:4860::8888]'
+        plain: 'udp://223.5.5.5:53'
+    }
+}
+routing {
+    fallback: direct
+}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conf, err := New(sections)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []KeyableString{
+		"hk:tcp+udp://dns.google:53 [outbound:hk_group]",
+		"v6:udp://[2001:4860:4860::8888]",
+		"plain:udp://223.5.5.5:53",
+	}
+	if !reflect.DeepEqual(conf.Dns.Upstream, want) {
+		t.Fatalf("parsed upstreams = %#v", conf.Dns.Upstream)
+	}
+	b, err := conf.Marshal(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte(`hk:"tcp+udp://dns.google:53" [outbound:"hk_group"]`)) {
+		t.Fatalf("marshal mangled the outbound annotation:\n%s", string(b))
+	}
+	sections2, err := config_parser.Parse(string(b))
+	if err != nil {
+		t.Fatalf("parse-after-marshal: %v\n%s", err, string(b))
+	}
+	conf2, err := New(sections2)
+	if err != nil {
+		t.Fatalf("decode-after-marshal: %v\n%s", err, string(b))
+	}
+	if !reflect.DeepEqual(conf2.Dns.Upstream, want) {
+		t.Fatalf("round-trip upstreams = %#v", conf2.Dns.Upstream)
+	}
+}
+
+func TestSplitKeyableAnnotation(t *testing.T) {
+	tests := []struct {
+		in      string
+		body    string
+		ann     map[string]string
+		wantErr bool
+	}{
+		{in: "udp://1.1.1.1", body: "udp://1.1.1.1"},
+		{in: "udp://[::1]", body: "udp://[::1]"},
+		{in: "udp://[::1] [outbound:g]", body: "udp://[::1]", ann: map[string]string{"outbound": "g"}},
+		{in: "https://x/q [a:1,b: 2]", body: "https://x/q", ann: map[string]string{"a": "1", "b": "2"}},
+		{in: "udp://1.1.1.1 [outbound]", wantErr: true},
+		{in: "udp://1.1.1.1 [:g]", wantErr: true},
+	}
+	for _, tt := range tests {
+		body, ann, err := SplitKeyableAnnotation(tt.in)
+		if tt.wantErr {
+			if err == nil {
+				t.Errorf("%q: expected error", tt.in)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%q: %v", tt.in, err)
+			continue
+		}
+		if body != tt.body {
+			t.Errorf("%q: body = %q, want %q", tt.in, body, tt.body)
+		}
+		got := map[string]string{}
+		for _, a := range ann {
+			got[a.Key] = a.Val
+		}
+		if len(got) != len(tt.ann) {
+			t.Errorf("%q: annotation = %v, want %v", tt.in, got, tt.ann)
+		}
+		for k, v := range tt.ann {
+			if got[k] != v {
+				t.Errorf("%q: annotation = %v, want %v", tt.in, got, tt.ann)
+			}
+		}
+	}
+}
