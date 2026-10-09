@@ -2894,7 +2894,7 @@ do_tproxy_lan_egress(struct __sk_buff *skb, __u32 link_h_len,
 			return TC_ACT_SHOT;
 		}
 		report_parse_passthrough(ret);
-		return TC_ACT_OK;
+		return DAE_TC_CONTINUE;
 	}
 
 	if (skb->ingress_ifindex == NOWHERE_IFINDEX &&  // Only drop NDP_REDIRECT packets from localhost
@@ -3298,7 +3298,7 @@ static __noinline int do_tproxy_lan_ingress(struct __sk_buff *skb, __u32 link_h_
 			return TC_ACT_SHOT;
 		}
 		report_parse_passthrough(ret);
-		return TC_ACT_OK;
+		return DAE_TC_CONTINUE;
 	}
 
 	return tproxy_lan_ingress_role(skb, link_h_len, pkt);
@@ -3429,7 +3429,7 @@ static __noinline int do_tproxy_wan_ingress(struct __sk_buff *skb, __u32 link_h_
 			return TC_ACT_SHOT;
 		}
 		report_parse_passthrough(ret);
-		return TC_ACT_OK;
+		return DAE_TC_CONTINUE;
 	}
 
 	return tproxy_wan_ingress_role(skb, link_h_len, pkt);
@@ -3471,11 +3471,9 @@ do_tproxy_wan_lan_ingress(struct __sk_buff *skb, __u32 link_h_len)
 			return TC_ACT_SHOT;
 		}
 		report_parse_passthrough(ret);
-		/* The wan_ingress role used to consume the packet first and
-		 * return TC_ACT_OK for an unclassifiable frame, which made the
-		 * dual-role hook stop before the lan_ingress role. Preserve
-		 * that forwarding decision. */
-		return TC_ACT_OK;
+		/* Keep unclassifiable traffic flowing through the remaining TC
+		 * programs. The dual-role hook has no routing work for it. */
+		return DAE_TC_CONTINUE;
 	}
 
 	ret = tproxy_wan_ingress_role(skb, link_h_len, pkt);

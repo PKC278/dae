@@ -1737,7 +1737,7 @@ int testsetup_lan_ingress_udp_non_initial_fragment_passthrough(struct __sk_buff 
 SEC("tc/check/lan_ingress_udp_non_initial_fragment_passthrough")
 int testcheck_lan_ingress_udp_non_initial_fragment_passthrough(struct __sk_buff *skb)
 {
-	return check_status_and_mark(skb, TC_ACT_OK, 0);
+	return check_status_and_mark(skb, DAE_TC_CONTINUE, 0);
 }
 
 SEC("tc/pktgen/wan_egress_udp_non_initial_fragment_passthrough")
@@ -3645,7 +3645,7 @@ static __noinline long ab_frag_tail_burst_cb(__u32 index, void *raw)
 		ctx->status = 2;
 		return 1;
 	}
-	if (do_tproxy_lan_ingress(ctx->skb, ETH_HLEN) != TC_ACT_OK) {
+	if (do_tproxy_lan_ingress(ctx->skb, ETH_HLEN) != DAE_TC_CONTINUE) {
 		ctx->status = 3;
 		return 1;
 	}
@@ -3719,7 +3719,7 @@ int test_ab_parse_return_code_split(struct __sk_buff *skb)
 			  IPV4(7, 7, 7, 7), 0, 8, &ip, &l4))
 		return 7;
 	before = ab_read_stat(BPF_STATS_PARSE_UNSUPPORTED_L4);
-	if (do_tproxy_lan_ingress(skb, ETH_HLEN) != TC_ACT_OK)
+	if (do_tproxy_lan_ingress(skb, ETH_HLEN) != DAE_TC_CONTINUE)
 		return 8;
 	if (ab_read_stat(BPF_STATS_PARSE_UNSUPPORTED_L4) != before + 1)
 		return 9;
