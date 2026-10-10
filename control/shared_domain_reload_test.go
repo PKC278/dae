@@ -6,6 +6,7 @@
 package control
 
 import (
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -52,6 +53,45 @@ func TestSharedDomainReloadProjection(t *testing.T) {
 
 func TestSharedDomainReloadProjectionRealMap(t *testing.T) {
 	testSharedDomainReloadProjection(t, true)
+}
+
+func TestSharedDomainReloadStreamWithoutAddresses(t *testing.T) {
+	for _, reuseBitmap := range []bool{false, true} {
+		for _, answer := range [][]dnsmessage.RR{
+			nil,
+			{&dnsmessage.HTTPS{SVCB: dnsmessage.SVCB{
+				Hdr:    dnsmessage.RR_Header{Name: "gateway.fe.apple-dns.cn.", Rrtype: dnsmessage.TypeHTTPS},
+				Target: ".",
+			}}},
+			{&dnsmessage.CNAME{
+				Hdr:    dnsmessage.RR_Header{Name: "gateway.fe.apple-dns.cn.", Rrtype: dnsmessage.TypeCNAME},
+				Target: "target.example.",
+			}},
+		} {
+			t.Run(fmt.Sprintf("reuse=%t/answers=%v", reuseBitmap, answer), func(t *testing.T) {
+				core := &controlPlaneCore{}
+				core.bpf.Store(&bpfObjects{})
+				cp := &ControlPlane{core: core, controlPlaneGenerationState: controlPlaneGenerationState{
+					routingMatcher: buildSharedDomainReloadMatcher(t, "direct"),
+				}}
+				cacheKey := "gateway.fe.apple-dns.cn.65|asis@192.168.0.1:53"
+				cache := &DnsCache{Answer: answer}
+				count, err := cp.projectDnsReloadCacheStream(func(visit func(string, *DnsCache) error) error {
+					return visit(cacheKey, cache)
+				}, reuseBitmap)
+				if err != nil || count != 1 {
+					t.Fatalf("stream count=%d err=%v", count, err)
+				}
+				tracker := core.domainRoutingTrackerForSlot(0)
+				if len(tracker.owners) != 0 || len(tracker.ips) != 0 {
+					t.Fatalf("owner count=%d IP count=%d", len(tracker.owners), len(tracker.ips))
+				}
+				if cache.DomainBitmap != nil {
+					t.Fatal("源缓存位图被修改")
+				}
+			})
+		}
+	}
 }
 
 func testSharedDomainReloadProjection(t *testing.T, realMap bool) {
