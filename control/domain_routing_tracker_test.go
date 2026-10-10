@@ -73,6 +73,36 @@ func TestDomainRoutingTrackerMergesSharedIPAcrossOwners(t *testing.T) {
 	}
 }
 
+func TestDomainRoutingTrackerEmptyAnswerRemovesOwner(t *testing.T) {
+	core := &controlPlaneCore{}
+	core.bpf.Store(&bpfObjects{})
+	cache := domainRoutingACache("owner", "203.0.113.10", domainRoutingBitmap(1))
+	if err := core.BatchUpdateDomainRouting(cache); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.BatchUpdateDomainRouting(&DnsCache{RouteOwnerKey: "owner"}); err != nil {
+		t.Fatal(err)
+	}
+	tracker := core.domainRoutingTrackerForSlot(0)
+	if len(tracker.owners) != 0 || len(tracker.ips) != 0 {
+		t.Fatalf("owner count=%d IP count=%d", len(tracker.owners), len(tracker.ips))
+	}
+}
+
+func TestDomainRoutingOwnerSnapshotRejectsInvalidAddressBitmap(t *testing.T) {
+	for _, ip := range []string{"203.0.113.10", "2001:db8::10"} {
+		for _, bitmap := range [][]uint32{nil, make([]uint32, len(bpfDomainRouting{}.Bitmap)-1), make([]uint32, len(bpfDomainRouting{}.Bitmap)+1)} {
+			cache := domainRoutingACache("owner", ip, bitmap)
+			if net.ParseIP(ip).To4() == nil {
+				cache.Answer = []dnsmessage.RR{&dnsmessage.AAAA{AAAA: net.ParseIP(ip)}}
+			}
+			if _, err := buildDomainRoutingOwnerSnapshot(cache); err == nil {
+				t.Fatalf("IP=%s bitmap length=%d，预期返回长度校验错误", ip, len(bitmap))
+			}
+		}
+	}
+}
+
 func TestDomainRoutingTrackerKeepsFastPathForSameDecision(t *testing.T) {
 	domainMap := newJanitorTestMap(t, "domain_routing_map")
 	tracker := newDomainRoutingTracker()
