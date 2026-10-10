@@ -162,16 +162,17 @@ func buildDomainRoutingOwnerSnapshot(cache *DnsCache) (domainRoutingOwnerSnapsho
 	if cache == nil {
 		return domainRoutingOwnerSnapshot{}, nil
 	}
+	ips := extractIPsFromDnsCache(cache)
+	if len(ips) == 0 {
+		// 无地址的 DNS 响应无需内核位图，空快照也会移除该所有者的旧地址绑定。
+		return domainRoutingOwnerSnapshot{}, nil
+	}
 	if len(cache.DomainBitmap) != len(bpfDomainRouting{}.Bitmap) {
 		return domainRoutingOwnerSnapshot{}, fmt.Errorf("domain bitmap length not sync with kern program")
 	}
 	var snapshot domainRoutingOwnerSnapshot
 	copy(snapshot.bitmap.Bitmap[:], cache.DomainBitmap)
 	snapshot.decision = cache.DomainRoutingDecision
-	ips := extractIPsFromDnsCache(cache)
-	if len(ips) == 0 {
-		return snapshot, nil
-	}
 	snapshot.ips = make(map[[4]uint32]struct{}, len(ips))
 	for _, ip := range ips {
 		ip6 := ip.As16()
