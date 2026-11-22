@@ -15,7 +15,6 @@ on:
   push:
     branches:
       - main
-      - kdae
     paths:
       - "**/*.go"
       - "**/*.c"
@@ -23,32 +22,183 @@ on:
       - "go.mod"
       - "go.sum"
       - ".github/workflows/build.yml"
-      - ".github/workflows/seed-build.yml"
       - "Makefile"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialize release builds on the same ref so concurrent pushes cannot compute
+# the same next patch suffix.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  pre-actions:
-    uses: daeuniverse/ci-seed-jobs/.github/workflows/pre-actions.yml@master
-    with:
-      repository: ${{ github.repository }}
-      ref: ${{ github.sha }}
-      fetch-depth: 0
-      check-runs: '["build", "main-build-passed"]'
-    secrets: inherit
+  prepare:
+    name: Compute Release Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout codebase
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Resolve next release version from upstream
+        id: version
+        run: |
+          set -euo pipefail
+
+          git fetch --no-tags https://github.com/daeuniverse/dae.git 'refs/tags/v*:refs/upstream-tags/v*'
+
+          # Prefer the latest upstream semver tag reachable from HEAD; fall back
+          # to the latest upstream semver tag overall if histories diverge.
+          upstream_ver=$(
+            git for-each-ref --merged=HEAD --sort=-v:refname --format='%(refname:lstrip=2)' 'refs/upstream-tags/v*' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | head -n 1 || true
+          )
+          if [ -z "$upstream_ver" ]; then
+            upstream_ver=$(
+              git for-each-ref --sort=-v:refname --format='%(refname:lstrip=2)' 'refs/upstream-tags/v*' \
+                | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+                | head -n 1 || true
+            )
+          fi
+          if [ -z "$upstream_ver" ]; then
+            echo "::error::failed to determine upstream version tag from daeuniverse/dae"
+            exit 1
+          fi
+
+          escaped_ver=$(printf '%s' "$upstream_ver" | sed 's/\./\\./g')
+          max_n=$(
+            git ls-remote --tags --refs origin "refs/tags/${upstream_ver}.*" \
+              | awk '{print $2}' \
+              | sed 's|^refs/tags/||' \
+              | sed -nE "s/^${escaped_ver}\.([0-9]+)$/\1/p" \
+              | sort -n \
+              | tail -n 1 || true
+          )
+          if [ -z "$max_n" ]; then
+            next_n=1
+          else
+            next_n=$((max_n + 1))
+          fi
+
+          release_ver="${upstream_ver}.${next_n}"
+          echo "Upstream version: ${upstream_ver}"
+          echo "Next release version: ${release_ver}"
+          echo "version=${release_ver}" >> "$GITHUB_OUTPUT"
 
   build:
-    # uses: daeuniverse/dae/.github/workflows/seed-build.yml@main
-    uses: ./.github/workflows/seed-build.yml
-    with:
-      ref: ${{ github.sha }}
-      build-type: main-build
-    secrets: inherit
+    name: Build (${{ matrix.asset_name }})
+    needs: [prepare]
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: arm64
+            asset_name: dae-linux-arm64
+          - goos: linux
+            goarch: amd64
+            goamd64: v3
+            asset_name: dae-linux-x86_64
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      GOAMD64: ${{ matrix.goamd64 }}
+      CGO_ENABLED: 0
+    steps:
+      - name: Checkout codebase
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
-  post-actions:
-    if: always()
-    needs: [build]
-    uses: daeuniverse/ci-seed-jobs/.github/workflows/dae-post-actions.yml@master
-    with:
-      check-run-id: "dae-bot[bot]/main-build-passed"
-      check-run-conclusion: ${{ needs.build.result }}
-    secrets: inherit
+      - name: Set up Go 1.27
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.27
+          cache: false
+
+      - name: Cache Go modules
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-mod-1.27-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-mod-1.27-
+
+      - name: Cache Go build artifacts
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.cache/go-build
+          key: ${{ runner.os }}-go-build-1.27-${{ matrix.goos }}-${{ matrix.goarch }}-${{ matrix.goamd64 }}-${{ hashFiles('go.sum', 'Makefile') }}
+          restore-keys: |
+            ${{ runner.os }}-go-build-1.27-${{ matrix.goos }}-${{ matrix.goarch }}-${{ matrix.goamd64 }}-
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y clang-22 llvm-22
+
+      - name: Get project dependencies
+        run: |
+          git submodule update --init --recursive
+          go mod download -modcacherw
+
+      - name: Build dae binary
+        env:
+          GOFLAGS: "-modcacherw"
+        run: |
+          mkdir -p ./dist
+          export OUTPUT="dist/${{ matrix.asset_name }}"
+          export VERSION="${{ needs.prepare.outputs.version }}"
+          export CLANG=clang-22
+          export STRIP=llvm-strip-22
+          make
+
+      - name: Assert artifact build inputs (trace tag, GOEXPERIMENT)
+        run: ./scripts/check-artifact-build-env.sh "dist/${{ matrix.asset_name }}" "$GOARCH"
+
+      - name: Smoke test binary
+        if: matrix.goarch == 'amd64'
+        run: |
+          if /lib64/ld-linux-x86-64.so.2 --help 2>/dev/null | grep -Fq 'x86-64-v3 (supported'; then
+            ./dist/${{ matrix.asset_name }} --version
+          else
+            echo "Skipping runtime smoke test: runner CPU does not support x86-64-v3"
+          fi
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ matrix.asset_name }}
+          path: dist/${{ matrix.asset_name }}
+
+  release:
+    name: Create GitHub Release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download binary artifacts
+        uses: actions/download-artifact@c850b930e6ba138125429b7e5c93fc707a7f8427 # v4.1.4
+        with:
+          path: release/
+
+      - name: List release binaries
+        run: ls -lh release/*/*
+
+      - name: Create GitHub Release and upload binaries
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.version }}
+          name: ${{ needs.prepare.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: release/*/*
